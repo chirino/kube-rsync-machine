@@ -1,0 +1,234 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backupjobs.krm.chirino.github.io
+spec:
+  group: krm.chirino.github.io
+  scope: Namespaced
+  names:
+    plural: backupjobs
+    singular: backupjob
+    kind: BackupJob
+    shortNames: [bj]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Machine
+          type: string
+          jsonPath: .spec.machineRef.name
+        - name: Trigger
+          type: string
+          jsonPath: .spec.trigger
+          priority: 1
+        - name: Snapshot
+          type: string
+          jsonPath: .status.snapshotPath
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: Desired state for this custom resource.
+              required: [machineRef]
+              properties:
+                machineRef:
+                  type: object
+                  description: Machine to run for this backup.
+                  required: [name]
+                  properties:
+                    namespace:
+                      type: string
+                      description: Namespace of the referenced machine. Defaults to the BackupJob namespace.
+                    name:
+                      type: string
+                      description: Name of the referenced machine.
+                      minLength: 1
+                trigger:
+                  type: string
+                  description: Reason the backup was created. Defaults to Manual.
+                  enum: [Manual, Scheduled]
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Preparing, Running, Finalizing, Succeeded, Failed, Canceled]
+                  description: Current backup lifecycle phase.
+                startedAt:
+                  type: string
+                  format: date-time
+                  description: Time the backup run started.
+                completedAt:
+                  type: string
+                  format: date-time
+                  description: Time the backup run finished.
+                snapshotPath:
+                  type: string
+                  description: Snapshot path created by the run.
+                targetPhase:
+                  type: string
+                  description: Target-side data-plane phase.
+                lastCommand:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      description: Command identifier.
+                    type:
+                      type: string
+                      description: Command type.
+                    sentAt:
+                      type: string
+                      format: date-time
+                      description: Time the command was sent.
+                    acknowledgedAt:
+                      type: string
+                      format: date-time
+                      description: Time the command was acknowledged.
+                  description: Most recent control-plane command sent to the data plane.
+                includedMachines:
+                  type: array
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      namespace:
+                        type: string
+                        description: Namespace of a machine included in this run.
+                      name:
+                        type: string
+                        minLength: 1
+                        description: Name of a machine included in this run.
+                  description: Machines merged into this backup run.
+                mergedInto:
+                  type: object
+                  required: [name]
+                  properties:
+                    namespace:
+                      type: string
+                      description: Namespace of the merged target run.
+                    name:
+                      type: string
+                      minLength: 1
+                      description: Name of the merged target run.
+                  description: Run that this run was merged into.
+                transfers:
+                  type: array
+                  items:
+                    type: object
+                    required: [source]
+                    properties:
+                      source:
+                        type: string
+                        description: Namespace/name of the source.
+                      phase:
+                        type: string
+                        enum: [Pending, Preparing, Running, Succeeded, Failed, Skipped]
+                        description: Transfer lifecycle phase.
+                      percent:
+                        type: integer
+                        format: int32
+                        minimum: 0
+                        maximum: 100
+                        description: Approximate transfer completion percentage.
+                      bytesTransferred:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                        description: Literal file payload bytes transferred by rsync.
+                      rateBytesPerSecond:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                        description: Average transfer rate in bytes per second.
+                      filesTransferred:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                        description: Regular files transferred by rsync.
+                      totalFiles:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                        description: Total files seen by rsync.
+                      totalFileSize:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                        description: Total file size reported by rsync.
+                      bytesSent:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                        description: Bytes sent by the sender process.
+                      bytesReceived:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                        description: Bytes received by the sender process.
+                      speedup:
+                        type: number
+                        minimum: 0
+                        description: Rsync speedup ratio.
+                      message:
+                        type: string
+                        description: Human-readable transfer details.
+                      exitCode:
+                        type: integer
+                        format: int32
+                        description: Transfer process exit code.
+                      startedAt:
+                        type: string
+                        format: date-time
+                        description: Time this transfer started.
+                      completedAt:
+                        type: string
+                        format: date-time
+                        description: Time this transfer finished.
+                      captureMethod:
+                        type: string
+                        enum: [Direct, VolumeSnapshot, Auto]
+                        description: Capture method used for this transfer.
+                      volumeSnapshotName:
+                        type: string
+                        description: Temporary VolumeSnapshot used for this transfer.
+                      captureTime:
+                        type: string
+                        format: date-time
+                        description: Time the source capture was taken.
+                  description: Per-source transfer summaries.
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [lastTransitionTime, message, reason, status, type]
+                    properties:
+                      type: {type: string, description: Condition type.}
+                      status: {type: string, enum: ["True", "False", Unknown], description: Condition status.}
+                      observedGeneration: {type: integer, format: int64, description: Resource generation observed for the condition.}
+                      lastTransitionTime: {type: string, format: date-time, description: Time the condition last changed status.}
+                      reason: {type: string, description: Machine-readable reason for the condition.}
+                      message: {type: string, description: Human-readable condition details.}
+                  description: Kubernetes-style conditions for the resource.
+              description: Observed state reported by the operator.

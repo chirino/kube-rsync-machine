@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-rsync-machine-operator
+  labels:
+    app.kubernetes.io/name: kube-rsync-machine
+    app.kubernetes.io/part-of: kube-rsync-machine
+    control-plane: controller-manager

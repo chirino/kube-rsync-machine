@@ -1,0 +1,180 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rsyncmachines.krm.chirino.github.io
+spec:
+  group: krm.chirino.github.io
+  scope: Namespaced
+  names:
+    plural: rsyncmachines
+    singular: rsyncmachine
+    kind: RsyncMachine
+    shortNames: [rm]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: PVC
+          type: string
+          jsonPath: .spec.pvcName
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: RestorePoints
+          type: integer
+          jsonPath: .status.restorePointCount
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: RsyncMachine describes a target PVC, schedule, retention policy, and target-side job controls.
+              required: [pvcName]
+              properties:
+                pvcName:
+                  type: string
+                  description: Target PVC that stores restore points.
+                  minLength: 1
+                image:
+                  type: string
+                  description: Data-plane image override for jobs created for this machine.
+                schedule:
+                  type: string
+                  description: Cron expression for scheduled backups. Omit for manual-only backups.
+                concurrencyPolicy:
+                  type: string
+                  description: Behavior when a scheduled run overlaps an active run. Defaults to Forbid.
+                  enum: [Forbid, Replace]
+                retention:
+                  type: object
+                  description: Restore point retention counts.
+                  properties:
+                    hourly: {type: integer, format: int32, minimum: 0, description: Number of hourly restore points to keep.}
+                    daily: {type: integer, format: int32, minimum: 0, description: Number of daily restore points to keep.}
+                    weekly: {type: integer, format: int32, minimum: 0, description: Number of weekly restore points to keep.}
+                    monthly: {type: integer, format: int32, minimum: 0, description: Number of monthly restore points to keep.}
+                nodeSelector:
+                  type: object
+                  description: Node labels required for generated target-side jobs.
+                  additionalProperties:
+                    type: string
+                affinity:
+                  type: object
+                  description: Pod affinity rules for generated target-side jobs.
+                  x-kubernetes-preserve-unknown-fields: true
+                tolerations:
+                  type: array
+                  description: Tolerations for generated target-side jobs.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                topologySpreadConstraints:
+                  type: array
+                  description: Topology spread constraints for generated target-side jobs.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                schedulerName:
+                  type: string
+                  description: Scheduler name for generated target-side jobs.
+                priorityClassName:
+                  type: string
+                  description: PriorityClass for generated target-side jobs.
+                runtimeClassName:
+                  type: string
+                  description: RuntimeClass for generated target-side jobs.
+                imagePullSecrets:
+                  type: array
+                  description: Image pull secrets for generated target-side jobs.
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      name:
+                        type: string
+                        description: Name of the image pull secret.
+                securityContext:
+                  type: object
+                  description: Pod security context for generated target-side jobs.
+                  x-kubernetes-preserve-unknown-fields: true
+                resources:
+                  type: object
+                  description: Container resource requests and limits for generated target-side jobs.
+                  x-kubernetes-preserve-unknown-fields: true
+                runHistory:
+                  type: object
+                  description: Completed BackupJob history retention.
+                  properties:
+                    successful: {type: integer, format: int32, minimum: 0, description: Successful BackupJob records to keep.}
+                    failed: {type: integer, format: int32, minimum: 0, description: Failed BackupJob records to keep.}
+            status:
+              type: object
+              properties:
+                restorePointsUpdatedAt:
+                  type: string
+                  format: date-time
+                  description: Time restore point status was last refreshed.
+                restorePointCount:
+                  type: integer
+                  format: int32
+                  description: Number of restore points currently reported by the target PVC.
+                lastScheduledAt:
+                  type: string
+                  format: date-time
+                  description: Most recent time the schedule created a run.
+                restorePoints:
+                  type: array
+                  items:
+                    type: object
+                    required: [snapshot]
+                    properties:
+                      snapshot:
+                        type: string
+                        description: User-facing restore point value.
+                      resolvesTo:
+                        type: string
+                        description: Immutable restore point that this value resolves to.
+                      tier:
+                        type: string
+                        description: Restore point tier.
+                      createdAt:
+                        type: string
+                        format: date-time
+                        description: Time this restore point was created.
+                      bytesTransferred:
+                        type: integer
+                        format: int64
+                        minimum: 0
+                        description: Bytes transferred when this restore point was created.
+                  description: Restore points currently available on the target PVC.
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [lastTransitionTime, message, reason, status, type]
+                    properties:
+                      type: {type: string, description: Condition type.}
+                      status: {type: string, enum: ["True", "False", Unknown], description: Condition status.}
+                      observedGeneration: {type: integer, format: int64, description: Resource generation observed for the condition.}
+                      lastTransitionTime: {type: string, format: date-time, description: Time the condition last changed status.}
+                      reason: {type: string, description: Machine-readable reason for the condition.}
+                      message: {type: string, description: Human-readable condition details.}
+                  description: Kubernetes-style conditions for the resource.
+              description: Observed state reported by the operator.

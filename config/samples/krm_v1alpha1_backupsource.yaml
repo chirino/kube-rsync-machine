@@ -1,0 +1,11 @@
+apiVersion: krm.chirino.github.io/v1alpha1
+kind: BackupSource
+metadata:
+  name: app-data
+  namespace: default
+spec:
+  machineRef:
+    namespace: kube-rsync-machine
+    name: app-hourly
+  pvc: app-data
+  destinationPath: app/data

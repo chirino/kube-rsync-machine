@@ -1,0 +1,64 @@
+# see: https://taskfile.dev/ for usage
+version: "3"
+
+tasks:
+
+  test:
+    desc: "run unit tests"
+    vars:
+      GO: '{{.GO | default (env "GO") | default "go"}}'
+    cmds:
+      - "{{.GO}} test ./..."
+
+  docs-crd-reference:
+    desc: "generate the CRD reference documentation"
+    vars:
+      GO: '{{.GO | default (env "GO") | default "go"}}'
+    cmds:
+      - "{{.GO}} run ./hack/gen-crd-reference.go > docs/crd-reference.md"
+
+  test-integration:
+    desc: "run the kind integration tests"
+    vars:
+      IMG: '{{.IMG | default (env "IMG") | default "kube-rsync-machine:kind"}}'
+      KIND_CLUSTER: '{{.KIND_CLUSTER | default (env "KIND_CLUSTER") | default "kube-rsync-machine"}}'
+      KIND_USE_EXISTING: '{{.KIND_USE_EXISTING | default (env "KIND_USE_EXISTING") | default "0"}}'
+      PRESERVE_CLUSTER: '{{.PRESERVE_CLUSTER | default (env "PRESERVE_CLUSTER") | default "0"}}'
+      SKIP_BUILD: '{{.SKIP_BUILD | default (env "SKIP_BUILD") | default "0"}}'
+      SKIP_LOAD: '{{.SKIP_LOAD | default (env "SKIP_LOAD") | default "0"}}'
+      SKIP_DEPLOY: '{{.SKIP_DEPLOY | default (env "SKIP_DEPLOY") | default "0"}}'
+      KRM_INTEGRATION_NAMESPACE: '{{.KRM_INTEGRATION_NAMESPACE | default (env "KRM_INTEGRATION_NAMESPACE") | default "krm-it"}}'
+      KRM_INTEGRATION_PRESERVE: '{{.KRM_INTEGRATION_PRESERVE | default (env "KRM_INTEGRATION_PRESERVE") | default "0"}}'
+      KRM_INTEGRATION_SCENARIOS: '{{.KRM_INTEGRATION_SCENARIOS | default (env "KRM_INTEGRATION_SCENARIOS")}}'
+      TEST_RUN: '{{.TEST_RUN | default (env "TEST_RUN") | default "TestKind"}}'
+      TEST_TIMEOUT: '{{.TEST_TIMEOUT | default (env "TEST_TIMEOUT") | default "20m"}}'
+    env:
+      IMG: "{{.IMG}}"
+      KIND_CLUSTER: "{{.KIND_CLUSTER}}"
+      KIND_USE_EXISTING: "{{.KIND_USE_EXISTING}}"
+      PRESERVE_CLUSTER: "{{.PRESERVE_CLUSTER}}"
+      SKIP_BUILD: "{{.SKIP_BUILD}}"
+      SKIP_LOAD: "{{.SKIP_LOAD}}"
+      SKIP_DEPLOY: "{{.SKIP_DEPLOY}}"
+      KRM_INTEGRATION_NAMESPACE: "{{.KRM_INTEGRATION_NAMESPACE}}"
+      KRM_INTEGRATION_PRESERVE: "{{.KRM_INTEGRATION_PRESERVE}}"
+      KRM_INTEGRATION_SCENARIOS: "{{.KRM_INTEGRATION_SCENARIOS}}"
+      TEST_RUN: "{{.TEST_RUN}}"
+      TEST_TIMEOUT: "{{.TEST_TIMEOUT}}"
+    cmds:
+      - ./hack/kind-integration.sh
+
+  test-integration-deep:
+    desc: "run the extended kind integration test scenarios"
+    vars:
+      KRM_INTEGRATION_DEEP_SCENARIOS: '{{.KRM_INTEGRATION_DEEP_SCENARIOS | default (env "KRM_INTEGRATION_DEEP_SCENARIOS") | default "data-path,restart,finalizer-retry,restore-points,watch-reconcile,source-failure,out-of-space,manager-namespace"}}'
+    cmds:
+      - task: test-integration
+        vars:
+          KRM_INTEGRATION_SCENARIOS: "{{.KRM_INTEGRATION_DEEP_SCENARIOS}}"
+
+  dev:frontend:
+    desc: "run the frontend in dev mode with mock fixtures"
+    dir: frontend
+    cmds:
+      - VITE_KRM_MOCK=1 pnpm dev

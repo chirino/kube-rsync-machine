@@ -1,0 +1,11 @@
+apiVersion: krm.chirino.github.io/v1alpha1
+kind: RestoreJob
+metadata:
+  name: app-data-restore
+  namespace: default
+spec:
+  sourceRef:
+    name: app-data
+  overrides:
+    destination:
+      pvcName: app-data-restore

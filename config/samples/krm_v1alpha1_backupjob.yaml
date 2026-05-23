@@ -1,0 +1,8 @@
+apiVersion: krm.chirino.github.io/v1alpha1
+kind: BackupJob
+metadata:
+  name: app-hourly-manual
+  namespace: kube-rsync-machine
+spec:
+  machineRef:
+    name: app-hourly

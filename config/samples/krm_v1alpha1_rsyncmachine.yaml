@@ -1,0 +1,13 @@
+apiVersion: krm.chirino.github.io/v1alpha1
+kind: RsyncMachine
+metadata:
+  name: app-hourly
+  namespace: kube-rsync-machine
+spec:
+  pvcName: app-backups
+  schedule: "0 * * * *"
+  retention:
+    hourly: 24
+    daily: 7
+    weekly: 4
+    monthly: 6

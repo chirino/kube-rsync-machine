@@ -1,0 +1,172 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backupsources.krm.chirino.github.io
+spec:
+  group: krm.chirino.github.io
+  scope: Namespaced
+  names:
+    plural: backupsources
+    singular: backupsource
+    kind: BackupSource
+    shortNames: [bs]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Machine
+          type: string
+          jsonPath: .spec.machineRef.name
+        - name: PVC
+          type: string
+          jsonPath: .spec.pvc
+        - name: Destination
+          type: string
+          jsonPath: .spec.destinationPath
+        - name: Capture
+          type: string
+          jsonPath: .spec.consistency.capture
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: BackupSource describes one source PVC and where it is written in machine restore points.
+              required: [machineRef, pvc]
+              properties:
+                machineRef:
+                  type: object
+                  description: Machine that stores backups for this source.
+                  required: [name]
+                  properties:
+                    namespace:
+                      type: string
+                      description: Namespace of the referenced machine. Defaults to the BackupSource namespace.
+                    name:
+                      type: string
+                      description: Name of the referenced machine.
+                      minLength: 1
+                pvc:
+                  type: string
+                  description: Source PVC mounted by the sender job.
+                  minLength: 1
+                sourcePath:
+                  type: string
+                  description: Path inside the source PVC to back up. Defaults to /.
+                destinationPath:
+                  type: string
+                  description: Relative path under the source namespace in each restore point.
+                consistency:
+                  type: object
+                  description: Source capture behavior before rsync starts.
+                  properties:
+                    capture:
+                      type: string
+                      description: Capture method for source consistency.
+                      enum: [Direct, VolumeSnapshot, Auto]
+                      default: Auto
+                    volumeSnapshotClassName:
+                      type: string
+                      description: VolumeSnapshotClass to use when snapshot capture is selected.
+                    cleanupPolicy:
+                      type: string
+                      description: Cleanup behavior for temporary snapshot resources.
+                      enum: [Delete, RetainOnFailure]
+                      default: Delete
+                rsync:
+                  type: object
+                  description: Rsync options for this source.
+                  properties:
+                    delete:
+                      type: boolean
+                      description: Delete destination files that no longer exist in the source.
+                      default: true
+                    oneFileSystem:
+                      type: boolean
+                      description: Prevent rsync from crossing filesystem mount boundaries.
+                      default: true
+                nodeSelector:
+                  type: object
+                  description: Node labels required for generated sender jobs.
+                  additionalProperties:
+                    type: string
+                affinity:
+                  type: object
+                  description: Pod affinity rules for generated sender jobs.
+                  x-kubernetes-preserve-unknown-fields: true
+                tolerations:
+                  type: array
+                  description: Tolerations for generated sender jobs.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                topologySpreadConstraints:
+                  type: array
+                  description: Topology spread constraints for generated sender jobs.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                schedulerName:
+                  type: string
+                  description: Scheduler name for generated sender jobs.
+                priorityClassName:
+                  type: string
+                  description: PriorityClass for generated sender jobs.
+                runtimeClassName:
+                  type: string
+                  description: RuntimeClass for generated sender jobs.
+                imagePullSecrets:
+                  type: array
+                  description: Image pull secrets for generated sender jobs.
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      name:
+                        type: string
+                        description: Name of the image pull secret.
+                securityContext:
+                  type: object
+                  description: Pod security context for generated sender jobs.
+                  x-kubernetes-preserve-unknown-fields: true
+                resources:
+                  type: object
+                  description: Container resource requests and limits for generated sender jobs.
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [lastTransitionTime, message, reason, status, type]
+                    properties:
+                      type: {type: string, description: Condition type.}
+                      status: {type: string, enum: ["True", "False", Unknown], description: Condition status.}
+                      observedGeneration: {type: integer, format: int64, description: Resource generation observed for the condition.}
+                      lastTransitionTime: {type: string, format: date-time, description: Time the condition last changed status.}
+                      reason: {type: string, description: Machine-readable reason for the condition.}
+                      message: {type: string, description: Human-readable condition details.}
+                  description: Kubernetes-style conditions for the resource.
+              description: Observed state reported by the operator.
