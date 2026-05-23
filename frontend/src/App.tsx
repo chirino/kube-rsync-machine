@@ -570,7 +570,7 @@ export function App() {
 
         <section className="mt-10">
           <SectionHeader title="History" loading={loading} filteredOut={filteredOutCounts.history} />
-          <div className="space-y-0 overflow-hidden rounded-lg border border-parchment-200 bg-white">
+          <div className="space-y-0 overflow-visible rounded-lg border border-parchment-200 bg-white">
             {filteredHistory.length === 0 ? (
               <div className="p-4"><Empty label="No completed runs found" /></div>
             ) : null}
@@ -1563,6 +1563,7 @@ function RestoreDetails({
         <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.15em] text-stone2-400">From</div>
         <RefName value={refText(run.spec?.machineRef, run.metadata.namespace)} className="block text-sm text-stone2-700" nameLabel="Machine" />
         <Tip label="Snapshot" className="mt-0.5 block text-xs text-stone2-400">{snapshot}</Tip>
+        {source?.spec?.destinationPath ? <Tip label="Path" className="mt-0.5 block text-xs text-stone2-400">{source.spec.destinationPath}</Tip> : null}
       </div>
       <div className="rounded-md border border-parchment-200 bg-parchment-100 p-3">
         <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.15em] text-stone2-400">To</div>
@@ -1637,6 +1638,7 @@ function HistoryRunRow({
             <div className="mt-1"><RefName value={`${run.metadata.namespace || ""}/${run.metadata.name}`} className="text-sm font-medium text-stone2-800" nameLabel="Job" /></div>
             <div className="mt-1 text-[11px] text-stone2-400">
               <Tip label={isBackup ? "Snapshot" : "Restored Snapshot"}>{detail}</Tip>
+              <span className="ml-2 text-stone2-300">{formatRelativeTime(run.status?.completedAt)}</span>
             </div>
             {summaryStats.length > 0 ? (
               <StatDots stats={summaryStats} className="mt-1 text-xs text-stone2-500" />
@@ -1672,10 +1674,15 @@ function HistoryTransferRow({ transfer }: { transfer: TransferStatus }) {
         <div className="min-w-0 flex-1">
           <RefName value={transfer.source} className="text-sm font-medium text-stone2-700" nameLabel="Source" />
           <StatDots stats={stats} className="mt-0.5 text-xs text-stone2-400" />
-          {notice ? <TransferNotice notice={notice} /> : null}
           {!notice && transfer.message ? <div className="mt-1 text-xs text-stone2-400">{transfer.message}</div> : null}
         </div>
-        <div className="shrink-0">
+        <div className="shrink-0 flex items-center gap-1.5">
+          {notice ? (
+            <span className="relative group">
+              <span className="inline-flex items-center justify-center h-5 w-5 rounded-full bg-amber-100 border border-amber-300 text-amber-600 text-[11px] font-bold cursor-help">!</span>
+              <span className="notice-popup"><span className="font-medium">{notice.title}</span> &mdash; {notice.summary}</span>
+            </span>
+          ) : null}
           <Badge value={transfer.phase} detail={transfer.phase === "Failed" ? transfer.message : undefined} />
         </div>
       </div>
