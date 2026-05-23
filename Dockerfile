@@ -1,4 +1,4 @@
-FROM node:25-bookworm-slim AS frontend-builder
+FROM node:25-alpine AS frontend-builder
 
 WORKDIR /workspace/frontend
 RUN npm install -g pnpm@10.10.0
@@ -7,21 +7,19 @@ RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/kube-rsync-machine ./cmd/kube-rsync-machine
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/kube-rsync-machine ./cmd/kube-rsync-machine
 
-FROM debian:bookworm-slim
+FROM alpine:3.22
 
 ENV KRM_FRONTEND_DIR=/usr/share/kube-rsync-machine/frontend
 
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends ca-certificates rsync \
-	&& rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache ca-certificates rsync
 
 COPY --from=builder /out/kube-rsync-machine /usr/local/bin/kube-rsync-machine
 COPY --from=frontend-builder /workspace/frontend/dist/ /usr/share/kube-rsync-machine/frontend/
