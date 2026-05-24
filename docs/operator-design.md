@@ -25,11 +25,12 @@ runtime roles in `internal/cli`:
 - `manager`: runs the controller-runtime manager, live API, metrics, health
   checks, and control gRPC server.
 - `serve-target`: mounts the target PVC, serves or receives rsync over mTLS,
-  scans restore points, recovers target space, and finalizes backups.
+  scans restore points when applicable, recovers target space, and completes
+  backups.
 - `send-source`: mounts a source PVC or temporary snapshot PVC and sends data to
   the target receiver.
 - `restore`: runs the restore writer that copies one source tree out of a
-  target snapshot into a destination PVC.
+  target snapshot or current mirror into a destination PVC.
 
 The API types live in `api/v1alpha1`. Generated CRDs live under
 `config/crd/bases`. The controller implementation is concentrated in
@@ -44,13 +45,17 @@ Cross-namespace resources are correlated through labels and explicit cleanup
 instead of invalid cross-namespace owner references.
 
 `BackupSource` defines a source PVC, an optional path inside that PVC, a
-destination path inside target snapshots, default rsync options, and optional
-source-side pod scheduling/security settings. It references exactly one
-`RsyncMachine`.
+destination path, default rsync options, and optional source-side pod
+scheduling/security settings. For snapshot machines, the destination is stored
+under the source namespace inside each restore point. For mirror machines, the
+destination is relative to the target PVC root.
 
-`RsyncMachine` defines the target PVC, retention counts, optional schedule,
-optional data-plane image override, run-history limits, and target-side pod
-scheduling/security settings. One machine can have many sources.
+`RsyncMachine` defines the target PVC, backup strategy, retention counts,
+optional schedule, optional data-plane image override, run-history limits, and
+target-side pod scheduling/security settings. One machine can have many sources.
+`spec.strategy.type` defaults to `Snapshot`, which keeps restore points and uses
+retention. `Mirror` keeps only the current target tree; retention must be empty
+and `status.restorePoints` is kept empty.
 
 `BackupJob` is one backup execution for a machine. Scheduled runs and manual
 runs both use this same resource. Its status stores the durable run phase,
@@ -58,8 +63,8 @@ included machine list, per-source transfer summaries, target phase, command
 acknowledgement state, and terminal snapshot path.
 
 `RestoreJob` is one restore execution for a single `BackupSource`. It resolves
-the source's machine, selects a restore point, starts a target-side restore
-server, and starts a destination writer job.
+the source's machine, selects a restore point or the current mirror, starts a
+target-side restore server, and starts a destination writer job.
 
 The exact schemas and defaults are in [crd-reference.md](crd-reference.md).
 
@@ -88,9 +93,12 @@ the manager and run direct rsync backups.
 
 ### RsyncMachine Controller
 
-`RsyncMachineReconciler` validates the target PVC, validates that at least one
-`BackupSource` references the machine, validates effective destination paths,
-sets `Ready` and `Valid` conditions, and owns scheduled-run creation.
+`RsyncMachineReconciler` validates the target PVC, validates the backup
+strategy, validates that at least one `BackupSource` references the machine,
+validates effective destination paths, sets `Ready` and `Valid` conditions, and
+owns scheduled-run creation. For mirror machines it rejects non-empty retention
+and rejects overlapping source destinations when any overlapping source has
+effective `rsync.delete=true`.
 
 Scheduling is implemented in-process rather than by maintaining Kubernetes
 `CronJob` objects. The reconciler parses `spec.schedule` with
@@ -156,10 +164,13 @@ unstructured objects. Temporary snapshot PVCs and snapshots are labeled with the
 run identity for cleanup.
 
 When all source transfers succeed, the reconciler sends a `FinalizeBackupJob`
-command over the target command stream. The target job promotes the staged tree,
-creates tier snapshots, refreshes `latest`, applies retention, scans restore
-points, and reports completion. The event applier persists restore points onto
-the `RsyncMachine` and marks the run succeeded.
+command over the target command stream. Snapshot machines use that command to
+promote the staged tree, create tier snapshots, refresh `latest`, apply
+retention, scan restore points, and report completion. Mirror machines use the
+same command as a completion barrier after all direct target writes finish; the
+target reports `current` without promoting a staged tree or scanning restore
+points. The event applier persists restore points for snapshot machines, clears
+them for mirror machines, and marks the run succeeded.
 
 If a source sender fails with an out-of-space style error, the backup
 reconciler treats it as recoverable target pressure. The detector currently
@@ -183,8 +194,11 @@ PVCs, and optional snapshots by labels.
 ### RestoreJob Controller
 
 `RestoreJobReconciler` resolves the `BackupSource`, its machine, the selected
-snapshot, and the destination PVC namespace. It holds the restore while the
-machine is not ready or while an active backup owns the target guard.
+snapshot or mirror, and the destination PVC namespace. It holds the restore
+while the machine is not ready or while an active backup owns the target guard.
+For mirror machines, omitted `spec.snapshot`, `latest`, and `current` all
+resolve to the current mirror. Any other snapshot value is rejected because
+mirror machines do not retain history.
 
 When ready, it creates:
 
@@ -193,7 +207,8 @@ When ready, it creates:
 - A restore-writer mTLS secret and restore writer job in the restore job or
   destination namespace.
 
-The restore target serves the selected snapshot path from the target PVC. The
+The restore target serves the selected snapshot path from the target PVC for
+snapshot machines, or the current mirror root/subpath for mirror machines. The
 writer runs rsync into the destination PVC. Restore status currently follows the
 generated job conditions and accepted source events; a completed set of restore
 jobs marks the run succeeded, and any failed generated job marks it failed.
@@ -233,7 +248,7 @@ The implementation uses two layers of target protection:
 
 Restores do not mutate the target tree, but the restore controller waits behind
 an active backup guard. The backup controller also waits behind active restores
-so the target snapshot tree is not read while it is being finalized or changed.
+so the target tree is not read while it is being finalized or changed.
 
 ## Data Plane
 
@@ -251,7 +266,8 @@ The certificates identify the expected run and source/writer identity; server
 and client credentials are built in `internal/tlsutil` and
 `internal/controlgrpc`.
 
-`internal/dataplane/snapshot.go` owns the target PVC layout:
+Snapshot machines use the target PVC layout implemented in
+`internal/dataplane/snapshot.go`:
 
 - `.partial/<run-id>/...` is the staging area for a backup.
 - `hourly/<timestamp>/...` is the promoted immutable run snapshot.
@@ -261,6 +277,13 @@ and client credentials are built in `internal/tlsutil` and
 - Retention pruning removes older tier directories according to the machine
   retention policy.
 
+Mirror machines bypass that layout. The target receiver writes each source
+directly into the configured root-relative destination path, using `.` for the
+target PVC root. It does not create `.partial`, `latest`, `hourly`, `daily`,
+`weekly`, or `monthly`. Mirror restores use the synthetic snapshot value
+`current`; the restore target serves from the target PVC root plus the source's
+mirror destination path.
+
 `dataplane.RecoverSpace` provides emergency pruning for the controller recovery
 path. It checks free bytes with `statfs`, builds a list of removable snapshots
 from `hourly`, `daily`, `weekly`, and `monthly`, sorts them by modification time
@@ -269,9 +292,11 @@ removes candidates until the requested free-space threshold is met. If there are
 not enough removable snapshots, it returns an error and the backup run remains
 failed with the target recovery diagnostic.
 
-The target finalization path is idempotent. If `.partial/<run-id>` has already
-been promoted and the expected hourly snapshot exists, a repeated finalize
-command validates and reports the existing snapshot rather than copying again.
+The snapshot target finalization path is idempotent. If `.partial/<run-id>` has
+already been promoted and the expected hourly snapshot exists, a repeated
+finalize command validates and reports the existing snapshot rather than
+copying again. Mirror completion is also safe to replay because there is no
+promotion step; it only reports the already-written current target tree.
 
 ## Control Plane Events
 
@@ -279,7 +304,7 @@ command validates and reports the existing snapshot rather than copying again.
 processes call the gRPC server to:
 
 - Register a target command stream.
-- Report target phase and restore-point summaries.
+- Report target phase and, for snapshot machines, restore-point summaries.
 - Acknowledge target commands.
 - Report source/restore transfer progress and terminal state.
 
@@ -352,10 +377,12 @@ When adding behavior, keep these boundaries intact:
 
 The most important invariants are:
 
-- Never run two backups that mutate the same target snapshot tree concurrently.
+- Never run two backups that mutate the same target tree concurrently.
+- In mirror mode, reject overlapping destination paths when `--delete` could
+  remove files owned by another source.
 - Keep generated resources labeled well enough for cross-namespace cleanup.
 - Do not make CSI snapshot CRDs mandatory for direct-rsync clusters.
-- Keep target finalization idempotent.
+- Keep snapshot finalization and mirror completion idempotent.
 - Preserve numeric UID/GID values through rsync.
 - Treat the target PVC filesystem as the source of truth for restore data, with
-  `RsyncMachine.status.restorePoints` as discovery metadata.
+  `RsyncMachine.status.restorePoints` as snapshot discovery metadata.
