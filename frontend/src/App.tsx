@@ -1089,8 +1089,7 @@ function SectionHeader({ title, loading, filteredOut = 0 }: { title: string; loa
 
 function Badge({ value, title, detail }: { value?: string; title?: string; detail?: string }) {
   const isRunning = value === "Running" || value === "Preparing" || value === "Finalizing";
-  const isFailed = value === "Failed" || value === "Not ready";
-  const showPopup = isFailed && detail;
+  const showPopup = Boolean(detail) && value !== "Ready" && value !== "Succeeded";
   return (
     <span className={`relative shrink-0 ${showPopup ? "group" : ""}`}>
       <span title={showPopup ? undefined : title} className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium border ${phaseClass(value)} ${showPopup ? "cursor-help" : ""}`}>
@@ -1117,7 +1116,7 @@ function Tag({ value, title }: { value: string; title?: string }) {
 function MachineCard({ group, progress }: { group: MachineGroup; progress: ProgressState }) {
   const condition = group.machine.status?.conditions?.find((item) => item.type === "Ready");
   const readiness = machineReadiness(condition);
-  const activeBackup = newest(group.activeBackups)[0];
+  const activeBackups = newest(group.activeBackups);
   return (
     <div className="rounded-lg border border-parchment-200 bg-white hover-lift">
       <div className="p-4 sm:p-6">
@@ -1133,19 +1132,19 @@ function MachineCard({ group, progress }: { group: MachineGroup; progress: Progr
           </div>
         </div>
 
-        {activeBackup ? (
-          <div className="mb-6">
-            <ActiveRunCard kind="Backup" run={activeBackup} progress={progress[runKey("backups", activeBackup)]} compact />
+        {activeBackups.length > 0 ? (
+          <div className="mb-6 space-y-3">
+            {activeBackups.map((backup) => (
+              <ActiveRunCard
+                key={`backup-${backup.metadata.namespace}/${backup.metadata.name}`}
+                kind="Backup"
+                run={backup}
+                progress={progress[runKey("backups", backup)]}
+                compact
+              />
+            ))}
           </div>
         ) : null}
-
-        <div className="mb-6">
-          <div className="mb-3 flex items-center gap-2">
-            <div className="section-line" />
-            <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-stone2-400">Backup Schedule</span>
-          </div>
-          <ScheduleDetails machine={group.machine} />
-        </div>
 
         <div className="mb-6">
           <div className="mb-3 flex items-center gap-2">
@@ -1171,6 +1170,14 @@ function MachineCard({ group, progress }: { group: MachineGroup; progress: Progr
           </div>
         </div>
 
+        <div className="mb-6">
+          <div className="mb-3 flex items-center gap-2">
+            <div className="section-line" />
+            <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-stone2-400">Backup Schedule</span>
+          </div>
+          <ScheduleDetails machine={group.machine} />
+        </div>
+
         <RestorePointsSection
           machine={group.machine}
           sources={group.sources}
@@ -1184,16 +1191,28 @@ function MachineCard({ group, progress }: { group: MachineGroup; progress: Progr
 
 function ScheduleDetails({ machine }: { machine: KubeObject<MachineSpec, MachineStatus> }) {
   const spec = machine.spec;
+  const concurrency = spec?.concurrencyPolicy || "Forbid";
+  const successfulRuns = spec?.runHistory?.successful ?? 5;
+  const failedRuns = spec?.runHistory?.failed ?? 5;
   return (
     <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm sm:gap-x-8">
-      <div><span className="text-xs text-stone2-400">Cron</span> <span className="ml-1 text-stone2-700">{spec?.schedule || "manual"}</span></div>
-      <div><span className="text-xs text-stone2-400">Concurrency</span> <span className="ml-1 text-stone2-700">{spec?.concurrencyPolicy || "Forbid"}</span></div>
-      <div><span className="text-xs text-stone2-400">Retention</span> <span className="ml-1 text-stone2-700">{formatRetention(spec?.retention)}</span></div>
+      <div>
+        <span className="text-xs text-stone2-400">Cron</span>{" "}
+        <Tip label={cronDescription(spec?.schedule)} className="ml-1 text-stone2-700">{spec?.schedule || "manual"}</Tip>
+      </div>
+      <div>
+        <span className="text-xs text-stone2-400">Concurrency</span>{" "}
+        <Tip label={concurrencyDescription(concurrency)} className="ml-1 text-stone2-700">{concurrency}</Tip>
+      </div>
+      <div>
+        <span className="text-xs text-stone2-400">Restore Points</span>{" "}
+        <RetentionDetails retention={spec?.retention} />
+      </div>
       <div>
         <span className="text-xs text-stone2-400">Runs</span>{" "}
-        <span className="ml-1 text-sage-700">{spec?.runHistory?.successful ?? 0}</span>
-        <span className="text-stone2-300">/</span>
-        <span className="text-red-400">{spec?.runHistory?.failed ?? 0}</span>
+        <Tip label={`Retain ${successfulRuns} successful runs`} className="ml-1 text-sage-700">{successfulRuns}</Tip>
+        <span className="px-1 text-stone2-300">/</span>
+        <Tip label={`Retain ${failedRuns} failed runs`} className="text-red-400">{failedRuns}</Tip>
       </div>
       {spec?.schedulerName ? (
         <div><span className="text-xs text-stone2-400">Scheduler</span> <span className="ml-1 text-stone2-700">{spec.schedulerName}</span></div>
@@ -1492,12 +1511,9 @@ function ActiveRunCard({
   const percent = aggregatePercent(transfers, phase);
   const transferRate = aggregateTransferRate(transfers);
   const [transfersOpen, setTransfersOpen] = useState(false);
-  const condition = run.status?.conditions?.find((item) => item.status === "True" || item.message);
+  const condition = primaryRunCondition(run.status?.conditions);
   const zone = targetZone(run.status);
-  const detail =
-    kind === "Backup"
-      ? backupDetail(run.status)
-      : run.status?.message || condition?.message || "Restore in progress";
+  const detail = runStatusDetail(kind, run, transfers, condition);
   return (
     <div className={`flex rounded-md border ${compact ? "border-parchment-200 bg-parchment-100" : "border-parchment-200 bg-white hover-lift"}`}>
       <div className={`w-1 shrink-0 rounded-r-full my-3 ${isBackup ? "bg-sage-400" : "bg-sky-400"}`} />
@@ -1515,7 +1531,7 @@ function ActiveRunCard({
             <RunElapsed startedAt={run.status?.startedAt} />
           </div>
         </div>
-        <Badge value={phase} detail={failureDetail(run)} />
+        <Badge value={phase} detail={runBadgeDetail(kind, run, transfers, condition)} />
       </div>
       {kind === "Restore" ? <RestoreDetails run={run} source={source} /> : null}
       <div className="mt-4">
@@ -1825,6 +1841,77 @@ function conditionDetail(condition: Condition) {
   return [condition.reason, condition.message].filter(Boolean).join(": ");
 }
 
+function primaryRunCondition(conditions?: Condition[]) {
+  if (!conditions?.length) return undefined;
+  return (
+    conditions.find((condition) => condition.type === "Failed" && condition.status === "True") ||
+    conditions.find((condition) => condition.type === "TargetOverlap" && condition.status === "True") ||
+    conditions.find((condition) => condition.status === "False" || condition.status === "Unknown") ||
+    conditions.find((condition) => condition.type !== "Valid" && condition.message) ||
+    conditions.find((condition) => condition.message)
+  );
+}
+
+function runStatusDetail(
+  kind: "Backup" | "Restore",
+  run: KubeObject<BackupJobSpec & RestoreJobSpec, BackupJobStatus & RestoreJobStatus>,
+  transfers: TransferStatus[],
+  condition?: Condition,
+) {
+  const phase = run.status?.phase;
+  if (phase === "Failed" || phase === "Canceled") return failureDetail(run);
+  const conditionText = condition?.message ? conditionDetail(condition) : undefined;
+  const transferWait = transferWaitingDetail(transfers);
+  if (phase === "Pending") {
+    return conditionText || `Waiting for the operator to start ${runRef(run)}.`;
+  }
+  if (phase === "Preparing") {
+    if (conditionText && condition?.type !== "Valid") return conditionText;
+    if (kind === "Backup") {
+      if (!run.status?.targetPhase) {
+        return `Waiting for pod ${run.metadata.namespace || ""}/${targetJobName(run)} to start up.`;
+      }
+      return transferWait || "Waiting for source pod to contact operator.";
+    }
+    return transferWait || "Waiting for restore pod to contact operator.";
+  }
+  if (phase === "Running") {
+    return transferWait || conditionText || (kind === "Backup" ? backupDetail(run.status) : run.status?.message) || `${kind} is running.`;
+  }
+  if (phase === "Finalizing") {
+    return kind === "Backup" ? "Waiting for rsync machine to send backup summary." : conditionText || "Waiting for restore final status.";
+  }
+  return kind === "Backup"
+    ? backupDetail(run.status) || conditionText || "Waiting for progress."
+    : run.status?.message || conditionText || "Restore in progress.";
+}
+
+function runBadgeDetail(
+  kind: "Backup" | "Restore",
+  run: KubeObject<BackupJobSpec & RestoreJobSpec, BackupJobStatus & RestoreJobStatus>,
+  transfers: TransferStatus[],
+  condition?: Condition,
+) {
+  const phase = run.status?.phase;
+  if (!phase || phase === "Succeeded") return undefined;
+  return runStatusDetail(kind, run, transfers, condition);
+}
+
+function transferWaitingDetail(transfers: TransferStatus[]) {
+  const waiting = transfers.find((transfer) => transfer.phase === "Pending" || transfer.phase === "Preparing");
+  if (waiting?.message) return `${waiting.source}: ${waiting.message}`;
+  if (waiting) return `Waiting for source ${waiting.source} to contact operator.`;
+  return undefined;
+}
+
+function targetJobName(run: KubeObject) {
+  return `krm-target-${run.metadata.name}`;
+}
+
+function runRef(run: KubeObject) {
+  return `${run.metadata.namespace || ""}/${run.metadata.name}`;
+}
+
 function failureDetail(run: KubeObject<Record<string, unknown>, BackupJobStatus & RestoreJobStatus>) {
   const phase = run.status?.phase;
   if (phase !== "Failed" && phase !== "Canceled") return undefined;
@@ -1906,14 +1993,59 @@ function highlightYaml(yaml: string) {
   });
 }
 
-function formatRetention(retention?: RetentionPolicy) {
+function RetentionDetails({ retention }: { retention?: RetentionPolicy }) {
   const parts = [
     retention?.hourly ? `${retention.hourly} hourly` : undefined,
     retention?.daily ? `${retention.daily} daily` : undefined,
     retention?.weekly ? `${retention.weekly} weekly` : undefined,
     retention?.monthly ? `${retention.monthly} monthly` : undefined,
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(", ") : "-";
+  ].filter((part): part is string => Boolean(part));
+  if (parts.length === 0) return <span className="ml-1 text-stone2-700">-</span>;
+  return (
+    <span className="ml-1 text-stone2-700">
+      {parts.map((part, index) => (
+        <span key={part}>
+          {index > 0 ? ", " : null}
+          <Tip label="Restore Points Retention">{part}</Tip>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function concurrencyDescription(policy: string) {
+  switch (policy) {
+    case "Forbid":
+      return "Do not start a new scheduled backup while another run for this machine is active.";
+    case "Replace":
+      return "Cancel the active scheduled backup and replace it with the new scheduled run.";
+    default:
+      return `Concurrency policy: ${policy}`;
+  }
+}
+
+function cronDescription(schedule?: string) {
+  if (!schedule) return "No schedule; backups are started manually.";
+  const fields = schedule.trim().split(/\s+/);
+  if (fields.length !== 5) return "Custom cron schedule.";
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = fields;
+  if (minute === "0" && hour === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+    return "Runs every hour at minute 0.";
+  }
+  if (hour === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+    return `Runs every hour at minute ${minute}.`;
+  }
+  if (dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+    return `Runs every day at ${padCronTime(hour)}:${padCronTime(minute)}.`;
+  }
+  if (dayOfMonth === "*" && month === "*" && dayOfWeek !== "*") {
+    return `Runs on day-of-week ${dayOfWeek} at ${padCronTime(hour)}:${padCronTime(minute)}.`;
+  }
+  return `Cron schedule: ${schedule}`;
+}
+
+function padCronTime(value: string) {
+  return /^\d+$/.test(value) ? value.padStart(2, "0") : value;
 }
 
 function formatRunHistory(runHistory?: RunHistory) {
