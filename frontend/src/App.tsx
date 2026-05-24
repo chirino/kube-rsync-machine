@@ -1089,7 +1089,7 @@ function SectionHeader({ title, loading, filteredOut = 0 }: { title: string; loa
 
 function Badge({ value, title, detail }: { value?: string; title?: string; detail?: string }) {
   const isRunning = value === "Running" || value === "Preparing" || value === "Finalizing";
-  const showPopup = Boolean(detail) && value !== "Ready" && value !== "Succeeded";
+  const showPopup = Boolean(detail) && value !== "Ready" && value !== "Running" && value !== "Succeeded";
   return (
     <span className={`relative shrink-0 ${showPopup ? "group" : ""}`}>
       <span title={showPopup ? undefined : title} className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium border ${phaseClass(value)} ${showPopup ? "cursor-help" : ""}`}>
@@ -1846,9 +1846,20 @@ function primaryRunCondition(conditions?: Condition[]) {
   return (
     conditions.find((condition) => condition.type === "Failed" && condition.status === "True") ||
     conditions.find((condition) => condition.type === "TargetOverlap" && condition.status === "True") ||
-    conditions.find((condition) => condition.status === "False" || condition.status === "Unknown") ||
-    conditions.find((condition) => condition.type !== "Valid" && condition.message) ||
-    conditions.find((condition) => condition.message)
+    conditions.find((condition) => (condition.status === "False" || condition.status === "Unknown") && !isInformationalCondition(condition)) ||
+    conditions.find((condition) => condition.type !== "Valid" && condition.message && !isInformationalCondition(condition)) ||
+    conditions.find((condition) => condition.message && !isInformationalCondition(condition))
+  );
+}
+
+function isInformationalCondition(condition: Condition) {
+  return (
+    (condition.type === "TargetOverlap" && condition.status === "False") ||
+    (condition.type === "Failed" && condition.status === "False") ||
+    (condition.type === "Valid" && condition.status === "True") ||
+    (condition.type === "TargetReady" && condition.status === "True") ||
+    (condition.type === "Transport" && condition.status === "True") ||
+    (condition.type === "SnapshotCapture" && condition.status === "True")
   );
 }
 
