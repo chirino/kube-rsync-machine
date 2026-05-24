@@ -61,6 +61,18 @@ spec:
                       type: string
                       description: Snapshot keeps timestamped restore points; Mirror keeps only the current target tree.
                       enum: [Snapshot, Mirror]
+                allowedRestoreNamespaces:
+                  type: array
+                  description: Namespaces allowed to create RestoreJobs against this machine. Defaults to [.] where . means this RsyncMachine namespace; * allows all namespaces.
+                  items:
+                    type: string
+                    pattern: '^(\*|\.|[a-z0-9]([-a-z0-9]*[a-z0-9])?)$'
+                allowedSourceNamespaces:
+                  type: array
+                  description: Namespaces allowed to attach BackupSources to this machine. Defaults to [.] where . means this RsyncMachine namespace; * allows all namespaces.
+                  items:
+                    type: string
+                    pattern: '^(\*|\.|[a-z0-9]([-a-z0-9]*[a-z0-9])?)$'
                 schedule:
                   type: string
                   description: Cron expression for scheduled backups. Omit for manual-only backups.

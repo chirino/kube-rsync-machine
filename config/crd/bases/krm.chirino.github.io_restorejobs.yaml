@@ -71,7 +71,7 @@ spec:
                       properties:
                         namespace:
                           type: string
-                          description: Namespace containing the destination PVC.
+                          description: Namespace containing the destination PVC. Defaults to the RestoreJob namespace and cannot name a different namespace.
                         pvcName:
                           type: string
                           description: Destination PVC to mount and restore into.

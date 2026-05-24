@@ -54,6 +54,14 @@ func (in *RsyncMachineList) DeepCopyObject() runtime.Object {
 
 func (in *RsyncMachineSpec) DeepCopyInto(out *RsyncMachineSpec) {
 	*out = *in
+	if in.AllowedSourceNamespaces != nil {
+		out.AllowedSourceNamespaces = make([]string, len(in.AllowedSourceNamespaces))
+		copy(out.AllowedSourceNamespaces, in.AllowedSourceNamespaces)
+	}
+	if in.AllowedRestoreNamespaces != nil {
+		out.AllowedRestoreNamespaces = make([]string, len(in.AllowedRestoreNamespaces))
+		copy(out.AllowedRestoreNamespaces, in.AllowedRestoreNamespaces)
+	}
 	out.NodeSelector = copyStringMap(in.NodeSelector)
 	if in.Affinity != nil {
 		out.Affinity = in.Affinity.DeepCopy()

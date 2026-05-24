@@ -45,20 +45,31 @@ rules:
   - apiGroups:
       - ""
     resources:
-      - configmaps
       - events
+    verbs:
+      - create
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
       - persistentvolumeclaims
-      - pods
-      - pods/log
-      - secrets
-      - services
-      - serviceaccounts
     verbs:
       - create
       - delete
       - get
       - list
-      - patch
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+      - services
+    verbs:
+      - create
+      - delete
+      - get
+      - list
       - update
       - watch
   - apiGroups:
@@ -89,14 +100,19 @@ rules:
   - apiGroups:
       - snapshot.storage.k8s.io
     resources:
-      - volumesnapshotclasses
-      - volumesnapshotcontents
       - volumesnapshots
     verbs:
       - create
       - delete
       - get
       - list
-      - patch
-      - update
+      - watch
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshotclasses
+      - volumesnapshotcontents
+    verbs:
+      - get
+      - list
       - watch

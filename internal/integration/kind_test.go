@@ -783,6 +783,10 @@ metadata:
   namespace: %[2]s
 spec:
   pvcName: archive-pvc
+  allowedSourceNamespaces:
+    - %[1]s
+  allowedRestoreNamespaces:
+    - %[1]s
   concurrencyPolicy: Forbid
   retention:
     hourly: 2
@@ -815,6 +819,10 @@ metadata:
   namespace: %[2]s
 spec:
   pvcName: archive-pvc
+  allowedSourceNamespaces:
+    - %[1]s
+  allowedRestoreNamespaces:
+    - %[1]s
   strategy:
     type: Mirror
   concurrencyPolicy: Forbid
@@ -851,6 +859,10 @@ metadata:
     krm.chirino.github.io/test-recovery-min-available: 24Mi
 spec:
   pvcName: archive-pvc
+  allowedSourceNamespaces:
+    - %[1]s
+  allowedRestoreNamespaces:
+    - %[1]s
   concurrencyPolicy: Forbid
   retention:
     hourly: 2
@@ -925,6 +937,10 @@ metadata:
 spec:
   schedule: "* * * * *"
   pvcName: archive-pvc
+  allowedSourceNamespaces:
+    - %[1]s
+  allowedRestoreNamespaces:
+    - %[1]s
   concurrencyPolicy: Forbid
 ---
 apiVersion: krm.chirino.github.io/v1alpha1
@@ -950,6 +966,10 @@ metadata:
   namespace: %[2]s
 spec:
   pvcName: missing-archive-pvc
+  allowedSourceNamespaces:
+    - %[1]s
+  allowedRestoreNamespaces:
+    - %[1]s
 ---
 apiVersion: krm.chirino.github.io/v1alpha1
 kind: BackupSource

@@ -51,6 +51,38 @@ func ResolveObjectReference(ref krmv1alpha1.ObjectReference, defaultNamespace st
 	return types.NamespacedName{Namespace: namespace, Name: ref.Name}, nil
 }
 
+func SourceNamespaceAllowed(machine krmv1alpha1.RsyncMachine, namespace string) bool {
+	return namespaceAllowed(machine.Namespace, machine.Spec.AllowedSourceNamespaces, namespace)
+}
+
+func RestoreNamespaceAllowed(machine krmv1alpha1.RsyncMachine, namespace string) bool {
+	return namespaceAllowed(machine.Namespace, machine.Spec.AllowedRestoreNamespaces, namespace)
+}
+
+func namespaceAllowed(machineNamespace string, allowed []string, namespace string) bool {
+	if namespace == "" {
+		return false
+	}
+	if len(allowed) == 0 {
+		allowed = []string{"."}
+	}
+	for _, item := range allowed {
+		switch item {
+		case "*":
+			return true
+		case ".":
+			if namespace == machineNamespace {
+				return true
+			}
+		default:
+			if namespace == item {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func EffectiveDestinationPath(source krmv1alpha1.BackupSource) (string, error) {
 	return effectiveDestinationPath(source.Namespace, source.Spec.DestinationPath)
 }
@@ -191,6 +223,9 @@ func DetectDestinationPathConflicts(machines []krmv1alpha1.RsyncMachine, sources
 			if resolvedMachineRef != machineRef {
 				continue
 			}
+			if !SourceNamespaceAllowed(machine, source.Namespace) {
+				continue
+			}
 			if machine.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror {
 				continue
 			}
@@ -251,6 +286,9 @@ func DetectMirrorDestinationPathOverlaps(machine krmv1alpha1.RsyncMachine, sourc
 			continue
 		}
 		if resolvedMachineRef != machineRef {
+			continue
+		}
+		if !SourceNamespaceAllowed(machine, source.Namespace) {
 			continue
 		}
 		effective, err := effectiveMirrorDestinationPath(source.Spec.DestinationPath)
@@ -355,6 +393,9 @@ func CalculateTargetRunSet(machine krmv1alpha1.RsyncMachine, sources map[types.N
 			continue
 		}
 		if resolvedMachineRef != machineRef {
+			continue
+		}
+		if !SourceNamespaceAllowed(machine, source.Namespace) {
 			continue
 		}
 		if _, ok := sourcesByRef[sourceRef]; ok {

@@ -58,7 +58,9 @@ func backupTarget(namespace, name, pvc string) krmv1alpha1.RsyncMachine {
 	return krmv1alpha1.RsyncMachine{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 		Spec: krmv1alpha1.RsyncMachineSpec{
-			PVCName: pvc,
+			PVCName:                  pvc,
+			AllowedSourceNamespaces:  []string{"*"},
+			AllowedRestoreNamespaces: []string{"*"},
 		},
 	}
 }
@@ -78,7 +80,9 @@ func rsyncMachine(namespace, name string, target krmv1alpha1.ObjectReference, so
 	return krmv1alpha1.RsyncMachine{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 		Spec: krmv1alpha1.RsyncMachineSpec{
-			PVCName: target.Name + "-pvc",
+			PVCName:                  target.Name + "-pvc",
+			AllowedSourceNamespaces:  []string{"*"},
+			AllowedRestoreNamespaces: []string{"*"},
 		},
 	}
 }

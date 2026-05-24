@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path"
@@ -12,6 +13,7 @@ import (
 	"github.com/chirino/kube-rsync-machine/internal/control"
 	ptmmetrics "github.com/chirino/kube-rsync-machine/internal/metrics"
 	"github.com/chirino/kube-rsync-machine/internal/snapshot"
+	"github.com/chirino/kube-rsync-machine/internal/tlsutil"
 	"github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -76,6 +78,7 @@ type BackupJobReconciler struct {
 	Control              *control.Service
 	SnapshotCapabilities snapshot.Capabilities
 	ControlGRPCCA        []byte
+	ControlGRPCSigner    *tlsutil.CA
 	Recorder             record.EventRecorder
 }
 
@@ -545,7 +548,7 @@ func (r *BackupJobReconciler) ensureBackupJobCredentials(ctx context.Context, ru
 	for _, source := range runSet.Sources {
 		sources = append(sources, source.Source)
 	}
-	credentials, err := BuildBackupJobCredentialSecrets(run, target, sources, DefaultRunCertificateTTL, r.ControlGRPCCA)
+	credentials, err := BuildBackupJobCredentialSecretsWithSigner(run, target, sources, DefaultRunCertificateTTL, r.ControlGRPCSigner, r.ControlGRPCCA)
 	if err != nil {
 		return err
 	}
@@ -772,7 +775,10 @@ func (r *BackupJobReconciler) reconcileBackupJobJobStatus(ctx context.Context, r
 		if r.SnapshotCapabilities != nil {
 			snapshotAvailable = r.SnapshotCapabilities.VolumeSnapshotAvailable(ctx)
 		}
-		return ctrl.Result{}, cleanupBackupJobSnapshotResources(ctx, r.Client, run, snapshotAvailable)
+		if err := cleanupBackupJobSnapshotResources(ctx, r.Client, run, snapshotAvailable); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, cleanupRunCredentialSecrets(ctx, r.Client, run, runKindBackup)
 	}
 	var jobs batchv1.JobList
 	if err := r.List(ctx, &jobs, client.MatchingLabels{
@@ -970,6 +976,9 @@ func (r *BackupJobReconciler) reconcileBackupJobJobStatus(ctx context.Context, r
 	r.Metrics.RecordRunPhase(ptmmetrics.RunKindBackup, namespacedKey(run.Namespace, run.Name), oldPhase, run.Status.Phase)
 	if isTerminalPhase(run.Status.Phase) {
 		if err := r.releaseTargetGuardsForRun(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := cleanupRunCredentialSecrets(ctx, r.Client, run, runKindBackup); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, r.pruneBackupJobHistory(ctx, *run)
@@ -1454,8 +1463,39 @@ func createSecretIfMissing(ctx context.Context, c client.Client, secret *corev1.
 		if err := c.Create(ctx, secret); err != nil {
 			return fmt.Errorf("create secret %s/%s: %w", secret.Namespace, secret.Name, err)
 		}
+		return nil
+	}
+	if err := validateExistingGeneratedSecret(existing, *secret); err != nil {
+		return fmt.Errorf("existing secret %s/%s cannot be reused: %w", secret.Namespace, secret.Name, err)
 	}
 	return nil
+}
+
+func validateExistingGeneratedSecret(existing, desired corev1.Secret) error {
+	for key, value := range desired.Labels {
+		if existing.Labels[key] != value {
+			return fmt.Errorf("label %s=%q is required", key, value)
+		}
+	}
+	if existing.Type != corev1.SecretTypeTLS {
+		return fmt.Errorf("type must be %s", corev1.SecretTypeTLS)
+	}
+	expectedIdentity, err := tlsutil.BundleIdentity(tlsutil.Bundle{
+		CACertPEM: desired.Data[tlsutil.SecretCAFile],
+		CertPEM:   desired.Data[tlsutil.SecretCertFile],
+		KeyPEM:    desired.Data[tlsutil.SecretKeyFile],
+	})
+	if err != nil {
+		return fmt.Errorf("desired credential identity: %w", err)
+	}
+	if !bytes.Equal(existing.Data[tlsutil.SecretCAFile], desired.Data[tlsutil.SecretCAFile]) {
+		return fmt.Errorf("%s does not match the expected CA", tlsutil.SecretCAFile)
+	}
+	return tlsutil.VerifyIdentity(tlsutil.Bundle{
+		CACertPEM: existing.Data[tlsutil.SecretCAFile],
+		CertPEM:   existing.Data[tlsutil.SecretCertFile],
+		KeyPEM:    existing.Data[tlsutil.SecretKeyFile],
+	}, expectedIdentity, time.Now())
 }
 
 func (r *BackupJobReconciler) createJobIfMissing(ctx context.Context, job *batchv1.Job) error {
@@ -1677,6 +1717,7 @@ type RestoreJobReconciler struct {
 	ControlGRPCEndpoint  string
 	Metrics              *ptmmetrics.Recorder
 	ControlGRPCCA        []byte
+	ControlGRPCSigner    *tlsutil.CA
 	Recorder             record.EventRecorder
 }
 
@@ -1714,6 +1755,15 @@ func (r *RestoreJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, machineRef, &target); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	if !SourceNamespaceAllowed(target, source.Namespace) {
+		return ctrl.Result{}, r.failRestoreJob(ctx, &run, fmt.Errorf("BackupSource namespace %s is not allowed to attach to RsyncMachine %s", source.Namespace, machineRef.String()))
+	}
+	if !RestoreNamespaceAllowed(target, run.Namespace) {
+		return ctrl.Result{}, r.failRestoreJob(ctx, &run, fmt.Errorf("RestoreJob namespace %s is not allowed to restore from RsyncMachine %s", run.Namespace, machineRef.String()))
+	}
+	if destinationNamespace := run.Spec.Overrides.Destination.Namespace; destinationNamespace != "" && destinationNamespace != run.Namespace {
+		return ctrl.Result{}, r.failRestoreJob(ctx, &run, fmt.Errorf("RestoreJob destination namespace %s must match RestoreJob namespace %s", destinationNamespace, run.Namespace))
+	}
 	if !TargetReady(target) {
 		return ctrl.Result{}, r.holdRestoreJobForTarget(ctx, &run, target)
 	}
@@ -1729,9 +1779,9 @@ func (r *RestoreJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	run.Status.RestoredSnapshot = restoredSnapshot
 	destinationNamespace := run.Spec.Overrides.Destination.Namespace
 	if destinationNamespace == "" {
-		destinationNamespace = source.Namespace
+		destinationNamespace = run.Namespace
 	}
-	credentials, err := BuildRestoreJobCredentialSecrets(run, target, source, destinationNamespace, DefaultRunCertificateTTL, r.ControlGRPCCA)
+	credentials, err := BuildRestoreJobCredentialSecretsWithSigner(run, target, source, destinationNamespace, DefaultRunCertificateTTL, r.ControlGRPCSigner, r.ControlGRPCCA)
 	if err != nil {
 		return ctrl.Result{}, r.failRestoreJob(ctx, &run, err)
 	}
@@ -1934,6 +1984,12 @@ func machineRefForRestoreJobWithClient(ctx context.Context, c client.Client, run
 		}
 		return types.NamespacedName{}, false, err
 	}
+	if !SourceNamespaceAllowed(machine, source.Namespace) || !RestoreNamespaceAllowed(machine, run.Namespace) {
+		return types.NamespacedName{}, false, nil
+	}
+	if destinationNamespace := run.Spec.Overrides.Destination.Namespace; destinationNamespace != "" && destinationNamespace != run.Namespace {
+		return types.NamespacedName{}, false, nil
+	}
 	return machineRef, true, nil
 }
 
@@ -1952,7 +2008,7 @@ func (r *RestoreJobReconciler) holdRestoreJobForBackup(ctx context.Context, run 
 
 func (r *RestoreJobReconciler) reconcileRestoreJobJobStatus(ctx context.Context, run *krmv1alpha1.RestoreJob) error {
 	if isTerminalPhase(run.Status.Phase) {
-		return nil
+		return cleanupRunCredentialSecrets(ctx, r.Client, run, runKindRestore)
 	}
 	var jobs batchv1.JobList
 	if err := r.List(ctx, &jobs, client.MatchingLabels{
@@ -2018,6 +2074,9 @@ func (r *RestoreJobReconciler) reconcileRestoreJobJobStatus(ctx context.Context,
 		r.recordRunEvent(run, corev1.EventTypeWarning, ReasonRunFailed, "RestoreJob failed because a generated Job failed")
 	}
 	r.Metrics.RecordRunPhase(ptmmetrics.RunKindRestore, namespacedKey(run.Namespace, run.Name), oldPhase, run.Status.Phase)
+	if isTerminalPhase(run.Status.Phase) {
+		return cleanupRunCredentialSecrets(ctx, r.Client, run, runKindRestore)
+	}
 	return nil
 }
 
@@ -2255,6 +2314,14 @@ func cleanupBackupJobSnapshotResources(ctx context.Context, c client.Client, run
 		}
 	}
 	return nil
+}
+
+func cleanupRunCredentialSecrets(ctx context.Context, c client.Client, run client.Object, runKind string) error {
+	return deleteLabeledRunSecrets(ctx, c, client.MatchingLabels{
+		LabelRunNamespace: run.GetNamespace(),
+		LabelRunKind:      runKind,
+		LabelRun:          run.GetName(),
+	})
 }
 
 func deleteLabeledRunJobs(ctx context.Context, c client.Client, labels client.MatchingLabels) error {
@@ -2573,6 +2640,9 @@ func (r *RsyncMachineReconciler) validateRsyncMachineSources(ctx context.Context
 		if sourceMachineRef != machineRef {
 			continue
 		}
+		if !SourceNamespaceAllowed(machine, source.Namespace) {
+			continue
+		}
 		found = true
 		if _, err := EffectiveDestinationPathForStrategy(machine, source); err != nil {
 			return metav1.ConditionFalse, ReasonInvalidSpec, fmt.Sprintf("BackupSource %s has invalid destinationPath: %v", sourceRef.String(), err)
@@ -2715,6 +2785,9 @@ func (r *BackupSourceReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			} else {
 				changed = setCondition(&source.Status.Conditions, ConditionValid, metav1.ConditionUnknown, ReasonMissingReference, fmt.Sprintf("RsyncMachine %s could not be read: %v", machineRef.String(), err), source.Generation) || changed
 			}
+		} else if !SourceNamespaceAllowed(machine, source.Namespace) {
+			changed = setCondition(&source.Status.Conditions, ConditionValid, metav1.ConditionFalse, ReasonInvalidSpec, fmt.Sprintf("BackupSource namespace %s is not allowed to attach to RsyncMachine %s", source.Namespace, machineRef.String()), source.Generation) || changed
+			changed = setCondition(&source.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec, "BackupSource namespace is not allowed by the referenced RsyncMachine", source.Generation) || changed
 		} else {
 			var pvc corev1.PersistentVolumeClaim
 			ref := types.NamespacedName{Namespace: source.Namespace, Name: source.Spec.PVC}

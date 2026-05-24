@@ -76,6 +76,7 @@ func EnsureControlGRPCTLSSecret(ctx context.Context, c client.Client, namespace,
 
 	bundle := tlsutil.Bundle{
 		CACertPEM: secret.Data[tlsutil.SecretCAFile],
+		CAKeyPEM:  secret.Data[tlsutil.SecretCAKeyFile],
 		CertPEM:   secret.Data[tlsutil.SecretCertFile],
 		KeyPEM:    secret.Data[tlsutil.SecretKeyFile],
 	}
@@ -101,6 +102,9 @@ func EnsureControlGRPCTLSSecret(ctx context.Context, c client.Client, namespace,
 }
 
 func validControlGRPCBundle(bundle tlsutil.Bundle, namespace string) error {
+	if _, err := tlsutil.CAFromPEM(bundle.CACertPEM, bundle.CAKeyPEM); err != nil {
+		return err
+	}
 	if _, err := tls.X509KeyPair(bundle.CertPEM, bundle.KeyPEM); err != nil {
 		return err
 	}
@@ -108,7 +112,7 @@ func validControlGRPCBundle(bundle tlsutil.Bundle, namespace string) error {
 }
 
 func mintControlGRPCServerBundle(namespace string, ttl time.Duration) (tlsutil.Bundle, error) {
-	ca, err := tlsutil.NewRunCA(controlTLSRunNamespace, controlTLSRunName, ttl)
+	ca, err := tlsutil.NewCA("krm-control-ca", ttl)
 	if err != nil {
 		return tlsutil.Bundle{}, fmt.Errorf("mint control grpc ca: %w", err)
 	}
@@ -116,6 +120,7 @@ func mintControlGRPCServerBundle(namespace string, ttl time.Duration) (tlsutil.B
 	if err != nil {
 		return tlsutil.Bundle{}, fmt.Errorf("mint control grpc server certificate: %w", err)
 	}
+	bundle.CAKeyPEM = ca.Bundle().CAKeyPEM
 	return bundle, nil
 }
 

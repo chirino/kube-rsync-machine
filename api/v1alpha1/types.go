@@ -151,6 +151,8 @@ type RsyncMachineSpec struct {
 	PVCName                   string                            `json:"pvcName"`
 	Image                     string                            `json:"image,omitempty"`
 	Strategy                  BackupStrategy                    `json:"strategy,omitempty"`
+	AllowedSourceNamespaces   []string                          `json:"allowedSourceNamespaces,omitempty"`
+	AllowedRestoreNamespaces  []string                          `json:"allowedRestoreNamespaces,omitempty"`
 	Schedule                  string                            `json:"schedule,omitempty"`
 	ConcurrencyPolicy         ConcurrencyPolicy                 `json:"concurrencyPolicy,omitempty"`
 	Retention                 RetentionPolicy                   `json:"retention,omitempty"`

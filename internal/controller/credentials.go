@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	DefaultRunCertificateTTL = 25 * time.Hour
+	DefaultRunCertificateTTL = 2 * time.Hour
 	ControlCAFile            = tlsutil.SecretControlCAFile
 )
 
@@ -25,12 +25,24 @@ type CredentialSecret struct {
 }
 
 func BuildBackupJobCredentialSecrets(run krmv1alpha1.BackupJob, target krmv1alpha1.RsyncMachine, sources []krmv1alpha1.BackupSource, ttl time.Duration, controlCAPEM ...[]byte) ([]CredentialSecret, error) {
+	return buildBackupJobCredentialSecrets(run, target, sources, ttl, nil, controlCAPEM...)
+}
+
+func BuildBackupJobCredentialSecretsWithSigner(run krmv1alpha1.BackupJob, target krmv1alpha1.RsyncMachine, sources []krmv1alpha1.BackupSource, ttl time.Duration, signer *tlsutil.CA, controlCAPEM ...[]byte) ([]CredentialSecret, error) {
+	return buildBackupJobCredentialSecrets(run, target, sources, ttl, signer, controlCAPEM...)
+}
+
+func buildBackupJobCredentialSecrets(run krmv1alpha1.BackupJob, target krmv1alpha1.RsyncMachine, sources []krmv1alpha1.BackupSource, ttl time.Duration, signer *tlsutil.CA, controlCAPEM ...[]byte) ([]CredentialSecret, error) {
 	if ttl == 0 {
 		ttl = DefaultRunCertificateTTL
 	}
-	ca, err := tlsutil.NewRunCA(run.Namespace, run.Name, ttl)
-	if err != nil {
-		return nil, err
+	ca := signer
+	if ca == nil {
+		var err error
+		ca, err = tlsutil.NewRunCA(run.Namespace, run.Name, ttl)
+		if err != nil {
+			return nil, err
+		}
 	}
 	runID := RunID(run)
 	credentials := make([]CredentialSecret, 0, len(sources)+1)
@@ -68,15 +80,27 @@ func BuildBackupJobCredentialSecrets(run krmv1alpha1.BackupJob, target krmv1alph
 }
 
 func BuildRestoreJobCredentialSecrets(restore krmv1alpha1.RestoreJob, target krmv1alpha1.RsyncMachine, source krmv1alpha1.BackupSource, destinationNamespace string, ttl time.Duration, controlCAPEM ...[]byte) ([]CredentialSecret, error) {
+	return buildRestoreJobCredentialSecrets(restore, target, source, destinationNamespace, ttl, nil, controlCAPEM...)
+}
+
+func BuildRestoreJobCredentialSecretsWithSigner(restore krmv1alpha1.RestoreJob, target krmv1alpha1.RsyncMachine, source krmv1alpha1.BackupSource, destinationNamespace string, ttl time.Duration, signer *tlsutil.CA, controlCAPEM ...[]byte) ([]CredentialSecret, error) {
+	return buildRestoreJobCredentialSecrets(restore, target, source, destinationNamespace, ttl, signer, controlCAPEM...)
+}
+
+func buildRestoreJobCredentialSecrets(restore krmv1alpha1.RestoreJob, target krmv1alpha1.RsyncMachine, source krmv1alpha1.BackupSource, destinationNamespace string, ttl time.Duration, signer *tlsutil.CA, controlCAPEM ...[]byte) ([]CredentialSecret, error) {
 	if ttl == 0 {
 		ttl = DefaultRunCertificateTTL
 	}
 	if destinationNamespace == "" {
-		destinationNamespace = source.Namespace
+		destinationNamespace = restore.Namespace
 	}
-	ca, err := tlsutil.NewRunCA(restore.Namespace, restore.Name, ttl)
-	if err != nil {
-		return nil, err
+	ca := signer
+	if ca == nil {
+		var err error
+		ca, err = tlsutil.NewRunCA(restore.Namespace, restore.Name, ttl)
+		if err != nil {
+			return nil, err
+		}
 	}
 	runRef := types.NamespacedName{Namespace: restore.Namespace, Name: restore.Name}
 	runID := RunIDForRef(runRef)

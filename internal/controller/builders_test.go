@@ -777,8 +777,10 @@ func rsyncMachine(namespace, name string, target krmv1alpha1.ObjectReference, so
 	return krmv1alpha1.RsyncMachine{
 		ObjectMeta: objectMeta(namespace, name),
 		Spec: krmv1alpha1.RsyncMachineSpec{
-			PVCName:   target.Name + "-pvc",
-			Retention: retention,
+			PVCName:                  target.Name + "-pvc",
+			AllowedSourceNamespaces:  []string{"*"},
+			AllowedRestoreNamespaces: []string{"*"},
+			Retention:                retention,
 		},
 	}
 }

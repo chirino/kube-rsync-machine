@@ -18,6 +18,41 @@ func TestResolveObjectReferenceDefaultsNamespace(t *testing.T) {
 	}
 }
 
+func TestNamespaceAllowedDefaultsToMachineNamespace(t *testing.T) {
+	machine := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	machine.Spec.AllowedSourceNamespaces = nil
+	if !SourceNamespaceAllowed(machine, "backup") {
+		t.Fatal("expected default source namespace allowance to include machine namespace")
+	}
+	if SourceNamespaceAllowed(machine, "app") {
+		t.Fatal("expected default source namespace allowance to reject other namespaces")
+	}
+}
+
+func TestNamespaceAllowedTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowed   []string
+		namespace string
+		want      bool
+	}{
+		{name: "empty list", allowed: []string{}, namespace: "backup", want: true},
+		{name: "dot", allowed: []string{"."}, namespace: "backup", want: true},
+		{name: "star", allowed: []string{"*"}, namespace: "app", want: true},
+		{name: "literal", allowed: []string{"app"}, namespace: "app", want: true},
+		{name: "non match", allowed: []string{"app"}, namespace: "backup", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+			machine.Spec.AllowedSourceNamespaces = test.allowed
+			if got := SourceNamespaceAllowed(machine, test.namespace); got != test.want {
+				t.Fatalf("SourceNamespaceAllowed() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveDestinationPath(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -218,8 +253,10 @@ func backupTarget(namespace, name, pvc string, retention krmv1alpha1.RetentionPo
 	return krmv1alpha1.RsyncMachine{
 		ObjectMeta: objectMeta(namespace, name),
 		Spec: krmv1alpha1.RsyncMachineSpec{
-			PVCName:   pvc,
-			Retention: retention,
+			PVCName:                  pvc,
+			AllowedSourceNamespaces:  []string{"*"},
+			AllowedRestoreNamespaces: []string{"*"},
+			Retention:                retention,
 		},
 	}
 }

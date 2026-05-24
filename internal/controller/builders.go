@@ -40,6 +40,7 @@ const (
 	ControlGRPCService     = "kube-rsync-machine-controller-manager"
 	RsyncPort              = int32(873)
 	DefaultJobBackoffLimit = int32(0)
+	DefaultJobDeadline     = int64(3 * 60 * 60)
 
 	AnnotationTestTargetEmptyDirSizeLimit = "krm.chirino.github.io/test-target-empty-dir-size-limit"
 	AnnotationTestTargetSeedSnapshotBytes = "krm.chirino.github.io/test-target-seed-snapshot-bytes"
@@ -175,6 +176,11 @@ func jobBackoffLimit() *int32 {
 	return &value
 }
 
+func jobActiveDeadlineSeconds() *int64 {
+	value := DefaultJobDeadline
+	return &value
+}
+
 func BuildServeTargetJob(run krmv1alpha1.BackupJob, target krmv1alpha1.RsyncMachine, runSet TargetRunSet, image, timestamp string) (*batchv1.Job, error) {
 	return BuildServeTargetJobWithControl(run, target, runSet, image, timestamp, DataPlaneControlOptions{})
 }
@@ -237,7 +243,8 @@ func BuildServeTargetJobWithControl(run krmv1alpha1.BackupJob, target krmv1alpha
 			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: jobBackoffLimit(),
+			BackoffLimit:          jobBackoffLimit(),
+			ActiveDeadlineSeconds: jobActiveDeadlineSeconds(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: targetPodSpec(target, corev1.PodSpec{
@@ -376,7 +383,8 @@ func BuildSendSourceJobWithControl(run krmv1alpha1.BackupJob, source krmv1alpha1
 			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoffLimit,
+			BackoffLimit:          &backoffLimit,
+			ActiveDeadlineSeconds: jobActiveDeadlineSeconds(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: sourceSenderPodSpec(source, corev1.PodSpec{
@@ -468,7 +476,8 @@ func BuildRestoreTargetJobWithControl(restore krmv1alpha1.RestoreJob, source krm
 			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: jobBackoffLimit(),
+			BackoffLimit:          jobBackoffLimit(),
+			ActiveDeadlineSeconds: jobActiveDeadlineSeconds(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: targetPodSpec(target, corev1.PodSpec{
@@ -540,7 +549,7 @@ func BuildRestoreJobWithControl(restore krmv1alpha1.RestoreJob, source krmv1alph
 	image = machineImage(target, image)
 	destinationNamespace := restore.Spec.Overrides.Destination.Namespace
 	if destinationNamespace == "" {
-		destinationNamespace = source.Namespace
+		destinationNamespace = restore.Namespace
 	}
 	destinationPVC := restore.Spec.Overrides.Destination.PVCName
 	if destinationPVC == "" {
@@ -594,7 +603,8 @@ func BuildRestoreJobWithControl(restore krmv1alpha1.RestoreJob, source krmv1alph
 			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: jobBackoffLimit(),
+			BackoffLimit:          jobBackoffLimit(),
+			ActiveDeadlineSeconds: jobActiveDeadlineSeconds(),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: restoreWriterPodSpec(restore, corev1.PodSpec{

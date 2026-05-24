@@ -13,6 +13,7 @@ import (
 	"github.com/chirino/kube-rsync-machine/internal/liveapi"
 	ptmmetrics "github.com/chirino/kube-rsync-machine/internal/metrics"
 	"github.com/chirino/kube-rsync-machine/internal/snapshot"
+	"github.com/chirino/kube-rsync-machine/internal/tlsutil"
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -91,7 +92,11 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("ensure control grpc tls secret: %w", err)
 	}
 	controlGRPCCA := controlGRPCBundle.CACertPEM
-	controlGRPCCreds, err := controlgrpc.ServerCredentialsWithClientVerifier(controlGRPCBundle, NewRunClientCertificateVerifier(directClient))
+	controlGRPCSigner, err := tlsutil.CAFromPEM(controlGRPCBundle.CACertPEM, controlGRPCBundle.CAKeyPEM)
+	if err != nil {
+		return fmt.Errorf("load control grpc signer: %w", err)
+	}
+	controlGRPCCreds, err := controlgrpc.ServerCredentialsWithClientVerifier(controlGRPCBundle, NewRunClientCertificateVerifier(controlGRPCCA))
 	if err != nil {
 		return fmt.Errorf("build control grpc tls credentials: %w", err)
 	}
@@ -107,10 +112,10 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("setup BackupSource controller: %w", err)
 	}
 	controlOptions := controller.DefaultDataPlaneControlOptions(opts.Namespace)
-	if err := (&controller.BackupJobReconciler{Image: dataPlaneImage, ControlGRPCNamespace: controlOptions.GRPCNamespace, ControlGRPCEndpoint: controlOptions.GRPCEndpoint, Metrics: metricsRecorder, Control: controlService, SnapshotCapabilities: snapshotCapabilities, ControlGRPCCA: controlGRPCCA}).SetupWithManager(mgr); err != nil {
+	if err := (&controller.BackupJobReconciler{Image: dataPlaneImage, ControlGRPCNamespace: controlOptions.GRPCNamespace, ControlGRPCEndpoint: controlOptions.GRPCEndpoint, Metrics: metricsRecorder, Control: controlService, SnapshotCapabilities: snapshotCapabilities, ControlGRPCCA: controlGRPCCA, ControlGRPCSigner: controlGRPCSigner}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup BackupJob controller: %w", err)
 	}
-	if err := (&controller.RestoreJobReconciler{Image: dataPlaneImage, ControlGRPCNamespace: controlOptions.GRPCNamespace, ControlGRPCEndpoint: controlOptions.GRPCEndpoint, Metrics: metricsRecorder, ControlGRPCCA: controlGRPCCA}).SetupWithManager(mgr); err != nil {
+	if err := (&controller.RestoreJobReconciler{Image: dataPlaneImage, ControlGRPCNamespace: controlOptions.GRPCNamespace, ControlGRPCEndpoint: controlOptions.GRPCEndpoint, Metrics: metricsRecorder, ControlGRPCCA: controlGRPCCA, ControlGRPCSigner: controlGRPCSigner}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup RestoreJob controller: %w", err)
 	}
 	if err := mgr.Add(&ControlEventApplier{Client: mgr.GetClient(), Hub: controlService.Hub()}); err != nil {

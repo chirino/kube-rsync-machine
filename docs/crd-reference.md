@@ -136,7 +136,7 @@ Generated from `config/crd/bases/*.yaml`.
 | `spec.nodeSelector` | `map[string]string` | no |  |  | Node labels required for generated restore writer jobs. |
 | `spec.overrides` | `object` | no |  |  | Per-restore destination and rsync overrides. |
 | `spec.overrides.destination` | `object` | no |  |  | Destination override for this restore. |
-| `spec.overrides.destination.namespace` | `string` | no |  |  | Namespace containing the destination PVC. |
+| `spec.overrides.destination.namespace` | `string` | no |  |  | Namespace containing the destination PVC. Defaults to the RestoreJob namespace and cannot name a different namespace. |
 | `spec.overrides.destination.path` | `string` | no |  |  | Path inside the destination PVC. |
 | `spec.overrides.destination.pvcName` | `string` | no |  |  | Destination PVC to mount and restore into. |
 | `spec.overrides.rsync` | `object` | no |  |  | Rsync options for this restore. |
@@ -205,6 +205,8 @@ Generated from `config/crd/bases/*.yaml`.
 | Field | Type | Required | Default | Enum | Description |
 | --- | --- | --- | --- | --- | --- |
 | `spec.affinity` | `object` | no |  |  | Pod affinity rules for generated target-side jobs. |
+| `spec.allowedRestoreNamespaces` | `[]string` | no |  |  | Namespaces allowed to create RestoreJobs against this machine. Defaults to [.] where . means this RsyncMachine namespace; * allows all namespaces. |
+| `spec.allowedSourceNamespaces` | `[]string` | no |  |  | Namespaces allowed to attach BackupSources to this machine. Defaults to [.] where . means this RsyncMachine namespace; * allows all namespaces. |
 | `spec.concurrencyPolicy` | `string` | no |  | "Forbid", "Replace" | Behavior when a scheduled run overlaps an active run. Defaults to Forbid. |
 | `spec.image` | `string` | no |  |  | Data-plane image override for jobs created for this machine. |
 | `spec.imagePullSecrets` | `[]object` | no |  |  | Image pull secrets for generated target-side jobs. |
@@ -226,7 +228,7 @@ Generated from `config/crd/bases/*.yaml`.
 | `spec.schedulerName` | `string` | no |  |  | Scheduler name for generated target-side jobs. |
 | `spec.securityContext` | `object` | no |  |  | Pod security context for generated target-side jobs. |
 | `spec.strategy` | `object` | no |  |  | Backup storage strategy. Defaults to Snapshot. |
-| `spec.strategy.type` | `string` | no | `Snapshot`, `Mirror` |  | Snapshot keeps timestamped restore points; Mirror keeps only the current target tree. |
+| `spec.strategy.type` | `string` | no |  | "Snapshot", "Mirror" | Snapshot keeps timestamped restore points; Mirror keeps only the current target tree. |
 | `spec.tolerations` | `[]object` | no |  |  | Tolerations for generated target-side jobs. |
 | `spec.topologySpreadConstraints` | `[]object` | no |  |  | Topology spread constraints for generated target-side jobs. |
 
@@ -250,3 +252,4 @@ Generated from `config/crd/bases/*.yaml`.
 | `status.restorePoints[].snapshot` | `string` | yes |  |  | User-facing restore point value. |
 | `status.restorePoints[].tier` | `string` | no |  |  | Restore point tier. |
 | `status.restorePointsUpdatedAt` | `string/date-time` | no |  |  | Time restore point status was last refreshed. |
+

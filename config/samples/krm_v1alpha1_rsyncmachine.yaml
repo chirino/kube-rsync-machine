@@ -5,6 +5,10 @@ metadata:
   namespace: kube-rsync-machine
 spec:
   pvcName: app-backups
+  allowedSourceNamespaces:
+    - default
+  allowedRestoreNamespaces:
+    - default
   schedule: "0 * * * *"
   retention:
     hourly: 24

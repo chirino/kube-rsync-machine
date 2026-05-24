@@ -130,6 +130,10 @@ metadata:
   namespace: kube-rsync-machine
 spec:
   pvcName: app-backups
+  allowedSourceNamespaces:
+    - "*"
+  allowedRestoreNamespaces:
+    - "*"
   schedule: "0 * * * *"
   retention:
     hourly: 24
@@ -140,6 +144,12 @@ spec:
 
 When `spec.schedule` is set, the operator creates scheduled `BackupJob`
 objects. Leave `schedule` empty if you only want manual runs.
+
+`spec.allowedSourceNamespaces` controls which namespaces may attach
+`BackupSource` objects, and `spec.allowedRestoreNamespaces` controls which
+namespaces may create `RestoreJob` objects against the machine. In both lists,
+`"."` means the machine namespace, `"*"` means all namespaces, and an omitted
+or empty list defaults to `[ "." ]`.
 
 `spec.image` overrides the manager's default data-plane image for this machine.
 Scheduling fields such as `nodeSelector`, `affinity`, `tolerations`,
@@ -225,7 +235,8 @@ Use the value in `snapshot` when creating a restore. `latest` is the default.
 
 Create or choose the destination PVC before starting a restore. Restoring into
 the original PVC is allowed, but restoring into a separate PVC first is safer
-because it lets you inspect the result before replacing application data.
+because it lets you inspect the result before replacing application data. The
+destination PVC must be in the same namespace as the `RestoreJob`.
 
 ```yaml
 apiVersion: krm.chirino.github.io/v1alpha1
@@ -251,7 +262,8 @@ Restore defaults:
 
 - `spec.snapshot` defaults to `latest` for snapshot machines. For mirror
   machines, omit it to restore from the current mirror.
-- `spec.overrides.destination.namespace` defaults to the source namespace.
+- `spec.overrides.destination.namespace` defaults to the `RestoreJob` namespace
+  and cannot name a different namespace.
 - `spec.overrides.destination.pvcName` defaults to the source PVC.
 - `spec.overrides.destination.path` defaults to the source path.
 - Restore rsync options default to the source rsync options unless restore
@@ -373,7 +385,7 @@ The manager exposes a read-only live HTTP API on port `8082` by default. If a
 built frontend directory is configured with `--frontend-dir` or `KRM_FRONTEND_DIR`,
 the same server also serves the UI.
 
-The API and UI should normally be exposed only behind an authentication and
+The API and UI should only be exposed behind an authentication and
 authorization layer, such as an authenticated ingress, SSO-aware reverse proxy,
 VPN-only gateway, or another cluster-approved access control layer. Do not put
 the live API/UI directly on the public internet. The API exposes rsync machines,

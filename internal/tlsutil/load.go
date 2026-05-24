@@ -10,6 +10,7 @@ import (
 
 const (
 	SecretCAFile        = "ca.crt"
+	SecretCAKeyFile     = "ca.key"
 	SecretCertFile      = "tls.crt"
 	SecretKeyFile       = "tls.key"
 	SecretControlCAFile = "control-ca.crt"

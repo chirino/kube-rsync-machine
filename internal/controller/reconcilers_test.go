@@ -9,6 +9,7 @@ import (
 	krmv1alpha1 "github.com/chirino/kube-rsync-machine/api/v1alpha1"
 	"github.com/chirino/kube-rsync-machine/internal/control"
 	"github.com/chirino/kube-rsync-machine/internal/snapshot"
+	"github.com/chirino/kube-rsync-machine/internal/tlsutil"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1630,22 +1631,98 @@ func TestRestoreJobReconcilerFailsWhenSnapshotMissing(t *testing.T) {
 	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: "krm-restore-restore-files"}, &batchv1.Job{})
 }
 
-func TestRestoreJobReconcilerCreatesCrossNamespaceTargetServerAndWriter(t *testing.T) {
+func TestBackupSourceReconcilerRejectsUnauthorizedNamespace(t *testing.T) {
 	scheme := testControllerScheme(t)
 	ctx := context.Background()
 	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
-	target.Status.RestorePoints = []krmv1alpha1.RestorePoint{{
-		Snapshot:   "latest",
-		ResolvesTo: "hourly/2026-05-20T10-00-00Z",
-	}}
+	target.Spec.AllowedSourceNamespaces = nil
+	source := backupSource("app-prod", "files", "data-pvc", "sites/demo/files")
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&krmv1alpha1.BackupSource{}).
+		WithObjects(&target, &source).
+		Build()
+	reconciler := BackupSourceReconciler{Client: client, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app-prod", Name: "files"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated krmv1alpha1.BackupSource
+	if err := client.Get(ctx, types.NamespacedName{Namespace: "app-prod", Name: "files"}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	assertCondition(t, updated.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec)
+}
+
+func TestCreateSecretIfMissingRejectsForgedGeneratedSecret(t *testing.T) {
+	scheme := testControllerScheme(t)
+	ctx := context.Background()
+	run := backupRun("backup", "demo-run", ref("backup", "archive"))
+	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	source := backupSource("app-prod", "files", "data-pvc", "sites/demo/files")
+	controlCA, err := tlsutil.NewCA("test-control-ca", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desiredCredentials, err := BuildBackupJobCredentialSecretsWithSigner(run, target, []krmv1alpha1.BackupSource{source}, time.Hour, controlCA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedCredentials, err := BuildBackupJobCredentialSecrets(run, target, []krmv1alpha1.BackupSource{source}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := desiredCredentials[1].Secret()
+	forged := forgedCredentials[1].Secret()
+	forged.Name = desired.Name
+	forged.Labels = desired.Labels
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(forged).Build()
+
+	err = createSecretIfMissing(ctx, client, desired)
+	if err == nil || !strings.Contains(err.Error(), "cannot be reused") {
+		t.Fatalf("expected forged generated secret to be rejected, got %v", err)
+	}
+}
+
+func TestRestoreJobReconcilerRejectsUnauthorizedNamespace(t *testing.T) {
+	scheme := testControllerScheme(t)
+	ctx := context.Background()
+	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	target.Spec.AllowedRestoreNamespaces = []string{"backup"}
 	source := backupSource("app-prod", "files", "data-pvc", "sites/demo/files")
 	restore := krmv1alpha1.RestoreJob{
-		ObjectMeta: objectMeta("backup", "restore-files"),
+		ObjectMeta: objectMeta("app-prod", "restore-files"),
 		Spec: krmv1alpha1.RestoreJobSpec{
 			SourceRef: ref("app-prod", "files"),
-			Snapshot:  "latest",
+		},
+	}
+	controllerutil.AddFinalizer(&restore, RestoreJobFinalizer)
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&krmv1alpha1.RestoreJob{}).
+		WithObjects(&target, &source, &restore).
+		Build()
+	reconciler := RestoreJobReconciler{Client: client, Scheme: scheme, Image: "krm:test"}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app-prod", Name: "restore-files"}})
+	if err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected unauthorized restore error, got %v", err)
+	}
+	assertNotFound(t, client, types.NamespacedName{Namespace: "app-prod", Name: "krm-restore-restore-files"}, &batchv1.Job{})
+}
+
+func TestRestoreJobReconcilerRejectsCrossNamespaceDestination(t *testing.T) {
+	scheme := testControllerScheme(t)
+	ctx := context.Background()
+	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	source := backupSource("app-prod", "files", "data-pvc", "sites/demo/files")
+	restore := krmv1alpha1.RestoreJob{
+		ObjectMeta: objectMeta("app-prod", "restore-files"),
+		Spec: krmv1alpha1.RestoreJobSpec{
+			SourceRef: ref("app-prod", "files"),
 			Overrides: krmv1alpha1.RestoreOverrides{
-				Destination: krmv1alpha1.RestoreDestination{Namespace: "app-prod"},
+				Destination: krmv1alpha1.RestoreDestination{Namespace: "other"},
 			},
 		},
 	}
@@ -1657,20 +1734,51 @@ func TestRestoreJobReconcilerCreatesCrossNamespaceTargetServerAndWriter(t *testi
 		Build()
 	reconciler := RestoreJobReconciler{Client: client, Scheme: scheme, Image: "krm:test"}
 
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "backup", Name: "restore-files"}})
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app-prod", Name: "restore-files"}})
+	if err == nil || !strings.Contains(err.Error(), "must match RestoreJob namespace") {
+		t.Fatalf("expected destination namespace error, got %v", err)
+	}
+	assertNotFound(t, client, types.NamespacedName{Namespace: "other", Name: "krm-restore-restore-files"}, &batchv1.Job{})
+}
+
+func TestRestoreJobReconcilerCreatesCrossNamespaceTargetServerAndWriter(t *testing.T) {
+	scheme := testControllerScheme(t)
+	ctx := context.Background()
+	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	target.Status.RestorePoints = []krmv1alpha1.RestorePoint{{
+		Snapshot:   "latest",
+		ResolvesTo: "hourly/2026-05-20T10-00-00Z",
+	}}
+	source := backupSource("app-prod", "files", "data-pvc", "sites/demo/files")
+	restore := krmv1alpha1.RestoreJob{
+		ObjectMeta: objectMeta("app-prod", "restore-files"),
+		Spec: krmv1alpha1.RestoreJobSpec{
+			SourceRef: ref("app-prod", "files"),
+			Snapshot:  "latest",
+		},
+	}
+	controllerutil.AddFinalizer(&restore, RestoreJobFinalizer)
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&krmv1alpha1.RestoreJob{}).
+		WithObjects(&target, &source, &restore).
+		Build()
+	reconciler := RestoreJobReconciler{Client: client, Scheme: scheme, Image: "krm:test"}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app-prod", Name: "restore-files"}})
 	if err != nil {
 		t.Fatalf("expected cross-namespace restore resources, got error: %v", err)
 	}
 	var updated krmv1alpha1.RestoreJob
-	if err := client.Get(ctx, types.NamespacedName{Namespace: "backup", Name: "restore-files"}, &updated); err != nil {
+	if err := client.Get(ctx, types.NamespacedName{Namespace: "app-prod", Name: "restore-files"}, &updated); err != nil {
 		t.Fatal(err)
 	}
 	if updated.Status.Phase != krmv1alpha1.RunPhasePreparing || updated.Status.RestoredSnapshot != "hourly/2026-05-20T10-00-00Z" {
 		t.Fatalf("unexpected status: %#v", updated.Status)
 	}
 	for _, ref := range []types.NamespacedName{
-		{Namespace: "backup", Name: "krm-tls-backup-restore-files-target-server-backup-archive"},
-		{Namespace: "app-prod", Name: "krm-tls-backup-restore-files-restore-writer-app-prod-files"},
+		{Namespace: "backup", Name: "krm-tls-app-prod-restore-files-target-server-backup-archive"},
+		{Namespace: "app-prod", Name: "krm-tls-app-prod-restore-files-restore-writer-app-prod-files"},
 		{Namespace: "backup", Name: "krm-restore-target-restore-files"},
 		{Namespace: "app-prod", Name: "krm-restore-restore-files"},
 	} {
@@ -1701,9 +1809,7 @@ func TestRestoreJobReconcilerCreatesCrossNamespaceTargetServerAndWriter(t *testi
 	if err := client.Get(ctx, types.NamespacedName{Namespace: "app-prod", Name: "krm-restore-restore-files"}, &writer); err != nil {
 		t.Fatal(err)
 	}
-	if len(writer.OwnerReferences) != 0 {
-		t.Fatalf("expected cross-namespace restore writer to avoid owner references, got %#v", writer.OwnerReferences)
-	}
+	assertControllerOwnerRef(t, writer.OwnerReferences, krmv1alpha1.SchemeGroupVersion.String(), "RestoreJob", restore.Name, restore.UID)
 	if len(writer.Spec.Template.Spec.Volumes) != 2 {
 		t.Fatalf("writer should only mount destination and tls volumes: %#v", writer.Spec.Template.Spec.Volumes)
 	}
@@ -1723,15 +1829,12 @@ func TestRestoreJobReconcilerHoldsWhenTargetReadyFalse(t *testing.T) {
 	}}
 	source := backupSource("app-prod", "files", "data-pvc", "sites/demo/files")
 	restore := krmv1alpha1.RestoreJob{
-		ObjectMeta: objectMeta("backup", "restore-files"),
+		ObjectMeta: objectMeta("app-prod", "restore-files"),
 		Spec: krmv1alpha1.RestoreJobSpec{
 			SourceRef: ref("app-prod", "files"),
 			Snapshot:  "latest",
 			Overrides: krmv1alpha1.RestoreOverrides{
-				Destination: krmv1alpha1.RestoreDestination{
-					Namespace: "app-prod",
-					PVCName:   "restore-pvc",
-				},
+				Destination: krmv1alpha1.RestoreDestination{PVCName: "restore-pvc"},
 			},
 		},
 	}
@@ -1743,12 +1846,12 @@ func TestRestoreJobReconcilerHoldsWhenTargetReadyFalse(t *testing.T) {
 		Build()
 	reconciler := RestoreJobReconciler{Client: client, Scheme: scheme, Image: "krm:test"}
 
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "backup", Name: "restore-files"}})
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app-prod", Name: "restore-files"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var updated krmv1alpha1.RestoreJob
-	if err := client.Get(ctx, types.NamespacedName{Namespace: "backup", Name: "restore-files"}, &updated); err != nil {
+	if err := client.Get(ctx, types.NamespacedName{Namespace: "app-prod", Name: "restore-files"}, &updated); err != nil {
 		t.Fatal(err)
 	}
 	if updated.Status.Phase != krmv1alpha1.RunPhasePending || len(updated.Status.Conditions) != 1 || updated.Status.Conditions[0].Type != "TargetReady" {
@@ -1767,15 +1870,12 @@ func TestRestoreJobReconcilerHoldsWhenTargetHasActiveBackup(t *testing.T) {
 	activeRun := backupRun("backup", "active-run", ref("backup", "active-plan"))
 	activeRun.Status.Phase = krmv1alpha1.RunPhaseRunning
 	restore := krmv1alpha1.RestoreJob{
-		ObjectMeta: objectMeta("backup", "restore-files"),
+		ObjectMeta: objectMeta("app-prod", "restore-files"),
 		Spec: krmv1alpha1.RestoreJobSpec{
 			SourceRef: ref("app-prod", "files"),
 			Snapshot:  "latest",
 			Overrides: krmv1alpha1.RestoreOverrides{
-				Destination: krmv1alpha1.RestoreDestination{
-					Namespace: "app-prod",
-					PVCName:   "restore-pvc",
-				},
+				Destination: krmv1alpha1.RestoreDestination{PVCName: "restore-pvc"},
 			},
 		},
 	}
@@ -1787,7 +1887,7 @@ func TestRestoreJobReconcilerHoldsWhenTargetHasActiveBackup(t *testing.T) {
 		Build()
 	reconciler := RestoreJobReconciler{Client: client, Scheme: scheme, Image: "krm:test"}
 
-	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "backup", Name: "restore-files"}})
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app-prod", Name: "restore-files"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1795,7 +1895,7 @@ func TestRestoreJobReconcilerHoldsWhenTargetHasActiveBackup(t *testing.T) {
 		t.Fatal("expected restore to requeue while backup is active")
 	}
 	var updated krmv1alpha1.RestoreJob
-	if err := client.Get(ctx, types.NamespacedName{Namespace: "backup", Name: "restore-files"}, &updated); err != nil {
+	if err := client.Get(ctx, types.NamespacedName{Namespace: "app-prod", Name: "restore-files"}, &updated); err != nil {
 		t.Fatal(err)
 	}
 	if updated.Status.Phase != krmv1alpha1.RunPhasePending || len(updated.Status.Conditions) != 1 {

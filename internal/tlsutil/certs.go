@@ -14,16 +14,21 @@ import (
 
 type Bundle struct {
 	CACertPEM []byte
+	CAKeyPEM  []byte
 	CertPEM   []byte
 	KeyPEM    []byte
 }
 
 func (b Bundle) SecretData() map[string][]byte {
-	return map[string][]byte{
+	data := map[string][]byte{
 		SecretCAFile:   append([]byte(nil), b.CACertPEM...),
 		SecretCertFile: append([]byte(nil), b.CertPEM...),
 		SecretKeyFile:  append([]byte(nil), b.KeyPEM...),
 	}
+	if len(b.CAKeyPEM) > 0 {
+		data[SecretCAKeyFile] = append([]byte(nil), b.CAKeyPEM...)
+	}
+	return data
 }
 
 type CA struct {
@@ -33,6 +38,10 @@ type CA struct {
 }
 
 func NewRunCA(runNamespace, runName string, ttl time.Duration) (*CA, error) {
+	return NewCA(fmt.Sprintf("krm-run-ca:%s/%s", runNamespace, runName), ttl)
+}
+
+func NewCA(commonName string, ttl time.Duration) (*CA, error) {
 	if ttl <= 0 {
 		return nil, fmt.Errorf("ttl must be positive")
 	}
@@ -43,7 +52,7 @@ func NewRunCA(runNamespace, runName string, ttl time.Duration) (*CA, error) {
 	now := time.Now().UTC()
 	cert := &x509.Certificate{
 		SerialNumber:          serial(),
-		Subject:               pkix.Name{CommonName: fmt.Sprintf("krm-run-ca:%s/%s", runNamespace, runName)},
+		Subject:               pkix.Name{CommonName: commonName},
 		NotBefore:             now.Add(-time.Minute),
 		NotAfter:              now.Add(ttl),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
@@ -56,6 +65,43 @@ func NewRunCA(runNamespace, runName string, ttl time.Duration) (*CA, error) {
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	return &CA{cert: cert, key: key, certPEM: certPEM}, nil
+}
+
+func CAFromPEM(certPEM, keyPEM []byte) (*CA, error) {
+	cert, err := parseCertificate(certPEM)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(keyPEM)
+	if block == nil || block.Type != "PRIVATE KEY" {
+		return nil, fmt.Errorf("CA private key PEM block is required")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	edKey, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("CA private key must be Ed25519")
+	}
+	if !cert.IsCA {
+		return nil, fmt.Errorf("certificate is not a CA")
+	}
+	return &CA{cert: cert, key: edKey, certPEM: append([]byte(nil), certPEM...)}, nil
+}
+
+func (ca *CA) Bundle() Bundle {
+	if ca == nil {
+		return Bundle{}
+	}
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(ca.key)
+	if err != nil {
+		return Bundle{CACertPEM: append([]byte(nil), ca.certPEM...)}
+	}
+	return Bundle{
+		CACertPEM: append([]byte(nil), ca.certPEM...),
+		CAKeyPEM:  pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes}),
+	}
 }
 
 func (ca *CA) Mint(identity Identity, ttl time.Duration) (Bundle, error) {
@@ -126,6 +172,20 @@ func VerifyIdentity(bundle Bundle, expected Identity, now time.Time) error {
 		}
 	}
 	return fmt.Errorf("certificate does not contain expected identity %s", expected.URI())
+}
+
+func BundleIdentity(bundle Bundle) (Identity, error) {
+	cert, err := parseCertificate(bundle.CertPEM)
+	if err != nil {
+		return Identity{}, err
+	}
+	for _, uri := range cert.URIs {
+		identity, err := ParseIdentity(uri.String())
+		if err == nil {
+			return identity, nil
+		}
+	}
+	return Identity{}, fmt.Errorf("certificate does not contain a kube-rsync-machine identity")
 }
 
 func parseCertificate(data []byte) (*x509.Certificate, error) {

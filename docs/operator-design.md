@@ -44,6 +44,13 @@ data-plane jobs are created in the namespace where the PVC they mount exists.
 Cross-namespace resources are correlated through labels and explicit cleanup
 instead of invalid cross-namespace owner references.
 
+`RsyncMachine` is the authorization boundary for cross-namespace use. Its
+`spec.allowedSourceNamespaces` controls which namespaces may attach
+`BackupSource` objects, and `spec.allowedRestoreNamespaces` controls which
+namespaces may create `RestoreJob` objects against it. In both fields, an empty
+list defaults to `[ "." ]`, `"."` means the machine namespace, and `"*"` means
+all namespaces.
+
 `BackupSource` defines a source PVC, an optional path inside that PVC, a
 destination path, default rsync options, and optional source-side pod
 scheduling/security settings. For snapshot machines, the destination is stored
@@ -64,7 +71,9 @@ acknowledgement state, and terminal snapshot path.
 
 `RestoreJob` is one restore execution for a single `BackupSource`. It resolves
 the source's machine, selects a restore point or the current mirror, starts a
-target-side restore server, and starts a destination writer job.
+target-side restore server, and starts a destination writer job. The restore
+writer always runs in the `RestoreJob` namespace and can only write to a PVC in
+that same namespace.
 
 The exact schemas and defaults are in [crd-reference.md](crd-reference.md).
 
@@ -95,10 +104,12 @@ the manager and run direct rsync backups.
 
 `RsyncMachineReconciler` validates the target PVC, validates the backup
 strategy, validates that at least one `BackupSource` references the machine,
+validates that at least one allowed `BackupSource` references the machine,
 validates effective destination paths, sets `Ready` and `Valid` conditions, and
-owns scheduled-run creation. For mirror machines it rejects non-empty retention
-and rejects overlapping source destinations when any overlapping source has
-effective `rsync.delete=true`.
+owns scheduled-run creation. Disallowed sources are ignored for machine
+readiness and are marked invalid by their own controller. For mirror machines it
+rejects non-empty retention and rejects overlapping source destinations when
+any overlapping allowed source has effective `rsync.delete=true`.
 
 Scheduling is implemented in-process rather than by maintaining Kubernetes
 `CronJob` objects. The reconciler parses `spec.schedule` with
@@ -121,8 +132,9 @@ on the target PVC.
 ### BackupSource Controller
 
 `BackupSourceReconciler` validates the source PVC reference, machine reference,
-and effective target destination path. It sets `Ready` and `Valid` conditions
-but does not create data-plane resources by itself.
+machine namespace allowance, and effective target destination path. It sets
+`Ready` and `Valid` conditions but does not create data-plane resources by
+itself.
 
 The controller watches:
 
@@ -136,7 +148,7 @@ The controller watches:
 `BackupJobReconciler` owns the backup state machine. For a new run it:
 
 1. Adds the run finalizer.
-2. Resolves the requested machine and all sources for that machine.
+2. Resolves the requested machine and all allowed sources for that machine.
 3. Coalesces duplicate pending backup jobs for the same target.
 4. Holds the run if the target is not ready, another backup is active, or a
    restore is active.
@@ -187,25 +199,29 @@ threshold is 64 MiB of available target space, with a test-only annotation in
 tests.
 
 Terminal failed and succeeded runs release target guard Leases, clean temporary
-snapshot resources, and participate in run-history pruning. Explicit deletion
-uses the finalizer path to delete generated jobs, services, secrets, temporary
-PVCs, and optional snapshots by labels.
+snapshot resources, delete generated run TLS secrets, and participate in
+run-history pruning. Explicit deletion uses the finalizer path to delete
+generated jobs, services, secrets, temporary PVCs, and optional snapshots by
+labels.
 
 ### RestoreJob Controller
 
 `RestoreJobReconciler` resolves the `BackupSource`, its machine, the selected
-snapshot or mirror, and the destination PVC namespace. It holds the restore
-while the machine is not ready or while an active backup owns the target guard.
-For mirror machines, omitted `spec.snapshot`, `latest`, and `current` all
-resolve to the current mirror. Any other snapshot value is rejected because
-mirror machines do not retain history.
+snapshot or mirror, and the destination PVC namespace. The restore namespace
+must be allowed by the machine, the referenced source namespace must also be
+allowed by the machine, and `spec.overrides.destination.namespace` must be empty
+or equal to the `RestoreJob` namespace. It holds the restore while the machine
+is not ready or while an active backup owns the target guard. For mirror
+machines, omitted `spec.snapshot`, `latest`, and `current` all resolve to the
+current mirror. Any other snapshot value is rejected because mirror machines do
+not retain history.
 
 When ready, it creates:
 
 - A target-side mTLS secret, restore target job, and restore service in the
   machine namespace.
-- A restore-writer mTLS secret and restore writer job in the restore job or
-  destination namespace.
+- A restore-writer mTLS secret and restore writer job in the `RestoreJob`
+  namespace.
 
 The restore target serves the selected snapshot path from the target PVC for
 snapshot machines, or the current mirror root/subpath for mirror machines. The
@@ -232,7 +248,9 @@ Important roles include `target-server`, `source-sender`, `restore-writer`, and
 
 Owner references are set only when Kubernetes namespace rules allow them. The
 cleanup path therefore always uses labels, because backup and restore runs can
-span machine, source, and destination namespaces.
+span machine and source namespaces. Existing generated TLS secrets are not
+blindly reused: if a secret exists at the generated name, the controller checks
+the expected labels, TLS type, CA, and certificate identity before accepting it.
 
 ## Target Exclusivity
 
@@ -264,7 +282,9 @@ summary fields become `TransferStatus` values.
 `internal/dataplane/transport.go` serves source and restore streams over mTLS.
 The certificates identify the expected run and source/writer identity; server
 and client credentials are built in `internal/tlsutil` and
-`internal/controlgrpc`.
+`internal/controlgrpc`. Generated Jobs also set `activeDeadlineSeconds` so
+stuck data-plane pods cannot outlive their short-lived credentials
+indefinitely.
 
 Snapshot machines use the target PVC layout implemented in
 `internal/dataplane/snapshot.go`:
@@ -320,16 +340,19 @@ a Kubernetes status write.
 
 ## TLS Model
 
-The manager maintains a control gRPC serving certificate in a Kubernetes secret.
-For each backup or restore run, the controller creates short-lived mTLS
-credentials for the target and each sender/writer. The generated jobs mount
-those secrets at `/var/run/kube-rsync-machine/tls`.
+The manager maintains a control-plane CA and control gRPC serving certificate in
+a Kubernetes secret. For each backup or restore run, the controller creates
+short-lived mTLS credentials for the target and each sender/writer. In the
+manager path, those credentials are signed by the control-plane CA and the
+generated jobs mount them at `/var/run/kube-rsync-machine/tls`.
 
-The control gRPC server verifies client certificates against run identity and
-the referenced Kubernetes objects. Data-plane mTLS verifies that the peer is the
-expected target/source/writer for the run. When changing identity formats or
-certificate TTLs, update `internal/tlsutil`, `internal/controlgrpc`, the
-builder tests, and the controller verifier tests together.
+The control gRPC server verifies data-plane client certificates against the
+control-plane CA and then checks the run-scoped identity carried in the
+certificate URI. It does not trust CA material from generated run secrets.
+Data-plane mTLS verifies that the peer is the expected target/source/writer for
+the run. When changing identity formats, signing behavior, or certificate TTLs,
+update `internal/tlsutil`, `internal/controlgrpc`, the builder tests, and the
+controller verifier tests together.
 
 ## Snapshot Capture
 
@@ -360,6 +383,17 @@ Kubernetes events are recorded for major lifecycle transitions and blocking
 conditions such as missing references, target not ready, active overlaps, and
 run failure.
 
+## RBAC Model
+
+The default installation uses a `ClusterRole` because machines, sources, backup
+runs, restore runs, and generated data-plane resources can span namespaces. Keep
+the role limited to resources the controllers actually reconcile: read PVCs,
+create/delete generated Jobs, Services, Secrets, temporary PVCs, and
+VolumeSnapshots, update CR status/finalizers, and write Kubernetes events.
+Avoid adding broad permissions such as pod log access, service account
+management, or configmap mutation unless a concrete controller path requires
+them.
+
 ## Extending the Operator
 
 When adding behavior, keep these boundaries intact:
@@ -380,6 +414,9 @@ The most important invariants are:
 - Never run two backups that mutate the same target tree concurrently.
 - In mirror mode, reject overlapping destination paths when `--delete` could
   remove files owned by another source.
+- Enforce machine namespace allow-lists before creating generated resources.
+- Keep restores scoped to the `RestoreJob` namespace.
+- Trust data-plane control clients only through the control-plane CA.
 - Keep generated resources labeled well enough for cross-namespace cleanup.
 - Do not make CSI snapshot CRDs mandatory for direct-rsync clusters.
 - Keep snapshot finalization and mirror completion idempotent.
