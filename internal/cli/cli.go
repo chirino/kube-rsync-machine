@@ -70,7 +70,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 func (a *App) usage() {
 	fmt.Fprintln(a.errOut, `Usage:
   kube-rsync-machine manager
-  kube-rsync-machine serve-target --target PATH --run-id ID --timestamp TS --source ns:path [--retention-hourly N]
+  kube-rsync-machine serve-target --target PATH --run-id ID --timestamp TS --source ns:path [--strategy snapshot|mirror] [--retention-hourly N]
   kube-rsync-machine serve-target --target PATH --restore-snapshot SNAPSHOT --restore-source PATH --restore-writer ns/name --tls-dir DIR
   kube-rsync-machine send-source --source PATH --target PATH [--delete] [--one-file-system] [--dry-run]
   kube-rsync-machine restore --snapshot PATH --destination PATH [--target-endpoint HOST:PORT] [--delete] [--one-file-system] [--dry-run]
@@ -123,6 +123,7 @@ func (a *App) serveTarget(args []string) error {
 	targetName := fs.String("target-name", "", "RsyncMachine name for control events")
 	listen := fs.String("listen", ":873", "mTLS receiver listen address when --tls-dir is set")
 	timestamp := fs.String("timestamp", time.Now().UTC().Format(dataplane.SnapshotTimestampLayout), "snapshot timestamp")
+	strategy := fs.String("strategy", "snapshot", "backup strategy: snapshot or mirror")
 	restoreSnapshot := fs.String("restore-snapshot", "", "restore snapshot to serve from the target root")
 	restoreSource := fs.String("restore-source", "", "restore source path to serve below the snapshot")
 	restoreWriter := fs.String("restore-writer", "", "expected restore writer identity as namespace/name")
@@ -206,7 +207,11 @@ func (a *App) serveTarget(args []string) error {
 	if *runID == "" {
 		return errors.New("--run-id is required")
 	}
-	receiverSources, finalizeSources, err := dataplane.ParseExpectedTransferSources(*runNamespace, *runName, *runID, sources)
+	mirrorStrategy := strings.EqualFold(*strategy, "mirror")
+	if !mirrorStrategy && !strings.EqualFold(*strategy, "snapshot") {
+		return fmt.Errorf("unsupported strategy %q", *strategy)
+	}
+	receiverSources, finalizeSources, err := dataplane.ParseExpectedTransferSourcesWithStrategy(*runNamespace, *runName, *runID, mirrorStrategy, sources)
 	if err != nil {
 		return err
 	}
@@ -227,6 +232,7 @@ func (a *App) serveTarget(args []string) error {
 				RunID:                   *runID,
 				TLSBundle:               tlsBundle,
 				Sources:                 receiverSources,
+				Mirror:                  mirrorStrategy,
 				ContinueOnTransferError: *controlGRPCEndpoint != "",
 				Log:                     a.out,
 			})
@@ -348,6 +354,33 @@ func (a *App) serveTarget(args []string) error {
 			})
 			return err
 		}
+	}
+	if mirrorStrategy {
+		a.log("completing mirror backup", "target", *target, "runID", *runID, "sources", strings.Join(finalizeSources, ","))
+		a.reportTarget(context.Background(), controlClient, control.TargetEvent{
+			RunNamespace:    *runNamespace,
+			RunName:         *runName,
+			RunKind:         control.RunKindBackup,
+			TargetNamespace: *targetNamespace,
+			TargetName:      *targetName,
+			Phase:           "Completed",
+			Snapshot:        "current",
+			BytesFreed:      0,
+			RestorePoints:   nil,
+			RestoreScanned:  true,
+		})
+		if finalizeCommandID != "" {
+			_ = a.ackTargetCommand(context.Background(), controlClient, control.TargetCommandAckEvent{
+				RunNamespace:    *runNamespace,
+				RunName:         *runName,
+				RunKind:         control.RunKindBackup,
+				TargetNamespace: *targetNamespace,
+				TargetName:      *targetName,
+				CommandID:       finalizeCommandID,
+				CommandType:     control.TargetCommandFinalizeBackupJob,
+			})
+		}
+		return nil
 	}
 	opts := dataplane.FinalizeOptions{
 		TargetRoot: *target,

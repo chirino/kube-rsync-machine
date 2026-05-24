@@ -39,6 +39,7 @@ type ExpectedRestoreWriter struct {
 type TargetReceiverOptions struct {
 	TargetRoot              string
 	RunID                   string
+	Mirror                  bool
 	TLSBundle               tlsutil.Bundle
 	Sources                 []ExpectedTransferSource
 	ContinueOnTransferError bool
@@ -105,7 +106,7 @@ func ServeTargetReceiver(ctx context.Context, listener net.Listener, opts Target
 		if source.Identity == (tlsutil.Identity{}) {
 			return fmt.Errorf("source identity is required")
 		}
-		destination, err := NormalizeRelativePath(source.Destination)
+		destination, err := NormalizeTargetSubpath(source.Destination)
 		if err != nil {
 			return fmt.Errorf("invalid destination for %s: %w", source.Identity.URI(), err)
 		}
@@ -143,7 +144,7 @@ func ServeTargetReceiver(ctx context.Context, listener net.Listener, opts Target
 		wg.Add(1)
 		go func(conn net.Conn) {
 			defer wg.Done()
-			identity, err := receiveTransfer(root, expected, conn, opts.Log)
+			identity, err := receiveTransfer(root, expected, conn, opts.Mirror, opts.Log)
 			results <- result{identity: identity, err: err}
 		}(conn)
 		res := <-results
@@ -175,7 +176,7 @@ func ServeRestoreTarget(ctx context.Context, listener net.Listener, opts Restore
 	if err != nil {
 		return fmt.Errorf("invalid restore snapshot: %w", err)
 	}
-	source, err := NormalizeRelativePath(opts.Writer.Source)
+	source, err := NormalizeTargetSubpath(opts.Writer.Source)
 	if err != nil {
 		return fmt.Errorf("invalid restore source: %w", err)
 	}
@@ -212,7 +213,7 @@ func SendSource(ctx context.Context, opts SourceSenderOptions) error {
 	if opts.Source == "" || opts.Destination == "" || opts.TargetEndpoint == "" {
 		return fmt.Errorf("source, destination, and target endpoint are required")
 	}
-	if _, err := NormalizeRelativePath(opts.Destination); err != nil {
+	if _, err := NormalizeTargetSubpath(opts.Destination); err != nil {
 		return fmt.Errorf("invalid destination: %w", err)
 	}
 	if opts.DryRun {
@@ -289,7 +290,7 @@ func ReceiveRestore(ctx context.Context, opts RestoreWriterOptions) error {
 	if err != nil {
 		return fmt.Errorf("invalid restore snapshot: %w", err)
 	}
-	source, err := NormalizeRelativePath(opts.Source)
+	source, err := NormalizeTargetSubpath(opts.Source)
 	if err != nil {
 		return fmt.Errorf("invalid restore source: %w", err)
 	}
@@ -366,7 +367,7 @@ func rsyncRestoreClientArgs(opts RestoreWriterOptions, bridgeAddr string) []stri
 	return args
 }
 
-func receiveTransfer(root string, expected map[tlsutil.Identity]string, conn net.Conn, log io.Writer) (tlsutil.Identity, error) {
+func receiveTransfer(root string, expected map[tlsutil.Identity]string, conn net.Conn, mirror bool, log io.Writer) (tlsutil.Identity, error) {
 	defer conn.Close()
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
@@ -388,7 +389,7 @@ func receiveTransfer(root string, expected map[tlsutil.Identity]string, conn net
 	if err != nil {
 		return identity, err
 	}
-	destination, err := NormalizeRelativePath(header.Destination)
+	destination, err := NormalizeTargetSubpath(header.Destination)
 	if err != nil {
 		return identity, fmt.Errorf("invalid sender destination: %w", err)
 	}
@@ -397,7 +398,7 @@ func receiveTransfer(root string, expected map[tlsutil.Identity]string, conn net
 	}
 	destinationRoot := filepath.Join(root, filepath.FromSlash(destination))
 	logLine(log, "target receiver preparing destination", "identity", identity.URI(), "destination", destination, "path", destinationRoot)
-	seeded, err := seedPartialDestination(root, destination)
+	seeded, err := prepareTransferDestination(root, destination, mirror)
 	if err != nil {
 		return identity, err
 	}
@@ -446,6 +447,24 @@ func seedPartialDestination(root, destination string) (bool, error) {
 		}
 		return true, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func prepareTransferDestination(root, destination string, mirror bool) (bool, error) {
+	if !mirror {
+		return seedPartialDestination(root, destination)
+	}
+	destination, err := NormalizeTargetSubpath(destination)
+	if err != nil {
+		return false, fmt.Errorf("invalid destination: %w", err)
+	}
+	destinationRoot := filepath.Join(root, filepath.FromSlash(destination))
+	if err := ensureInside(root, destinationRoot); err != nil {
 		return false, err
 	}
 	if err := os.MkdirAll(destinationRoot, 0o755); err != nil {
@@ -583,7 +602,7 @@ func serveRestoreTransfer(root string, expected ExpectedRestoreWriter, conn net.
 	if err != nil {
 		return fmt.Errorf("invalid requested restore snapshot: %w", err)
 	}
-	source, err := NormalizeRelativePath(header.Source)
+	source, err := NormalizeTargetSubpath(header.Source)
 	if err != nil {
 		return fmt.Errorf("invalid requested restore source: %w", err)
 	}
@@ -591,6 +610,9 @@ func serveRestoreTransfer(root string, expected ExpectedRestoreWriter, conn net.
 		return fmt.Errorf("restore writer requested %q/%q, expected %q/%q", snapshot, source, expected.Snapshot, expected.Source)
 	}
 	sourceRoot := filepath.Join(root, filepath.FromSlash(snapshot), filepath.FromSlash(source))
+	if snapshot == "current" {
+		sourceRoot = filepath.Join(root, filepath.FromSlash(source))
+	}
 	logLine(log, "restore target validating requested source", "snapshot", snapshot, "source", source, "path", sourceRoot)
 	if err := ensureInside(root, sourceRoot); err != nil {
 		return err
@@ -674,6 +696,10 @@ func readTransferHeader(r io.Reader) (transferHeader, error) {
 }
 
 func ParseExpectedTransferSources(runNamespace, runName, runID string, values []string) ([]ExpectedTransferSource, []string, error) {
+	return ParseExpectedTransferSourcesWithStrategy(runNamespace, runName, runID, false, values)
+}
+
+func ParseExpectedTransferSourcesWithStrategy(runNamespace, runName, runID string, mirror bool, values []string) ([]ExpectedTransferSource, []string, error) {
 	out := make([]ExpectedTransferSource, 0, len(values))
 	finalizeSources := make([]string, 0, len(values))
 	for _, value := range values {
@@ -681,7 +707,7 @@ func ParseExpectedTransferSources(runNamespace, runName, runID string, values []
 		if err != nil {
 			return nil, nil, err
 		}
-		finalizeDestination, err := NormalizeRelativePath(destination)
+		finalizeDestination, err := NormalizeTargetSubpath(destination)
 		if err != nil {
 			return nil, nil, fmt.Errorf("invalid source destination %q: %w", destination, err)
 		}
@@ -689,9 +715,16 @@ func ParseExpectedTransferSources(runNamespace, runName, runID string, values []
 		if sourceNamespace == "" || sourceName == "" {
 			continue
 		}
+		transferDestination := filepath.ToSlash(filepath.Join(".partial", runID, finalizeDestination))
+		if mirror {
+			transferDestination = finalizeDestination
+			if transferDestination == "" {
+				transferDestination = "."
+			}
+		}
 		out = append(out, ExpectedTransferSource{
 			Identity:    tlsutil.SourceIdentity(runNamespace, runName, sourceNamespace, sourceName),
-			Destination: filepath.ToSlash(filepath.Join(".partial", runID, finalizeDestination)),
+			Destination: transferDestination,
 		})
 	}
 	sort.Strings(finalizeSources)

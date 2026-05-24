@@ -21,6 +21,7 @@ const machineNamespace = "kube-rsync-machine"
 var defaultKindIntegrationScenarios = map[string]bool{
 	"install":          true,
 	"backup":           true,
+	"mirror":           true,
 	"restore":          true,
 	"data-path":        true,
 	"scheduling":       true,
@@ -75,6 +76,22 @@ func TestKindBackupAndRestoreMovesData(t *testing.T) {
 	applyYAML(t, restoreRunYAML(ns))
 	waitForJSONPath(t, 180*time.Second, ns, "restorejob/restore-files", "{.status.phase}", "Succeeded")
 	assertPVCFile(t, ns, "restore-pvc", "nested/data.txt", "payload-from-kind\n")
+}
+
+func TestKindMirrorBackupCopiesSourceRootToTargetRoot(t *testing.T) {
+	requireKindIntegration(t, "mirror")
+	ns := newKindNamespace(t, "mirror")
+	applyYAML(t, basePVCsYAML(ns)+"---\n"+mirrorBackupObjectsYAML(ns))
+	seedPVCFile(t, ns, "source-pvc", "nested/data.txt", "payload-from-mirror\n")
+	seedPVCFile(t, ns, "source-pvc", "top-level.txt", "top-level-mirror\n")
+	applyYAML(t, backupRunYAML(ns, "mirror-run"))
+
+	waitForJSONPath(t, 180*time.Second, machineNamespace, "backupjob/mirror-run", "{.status.phase}", "Succeeded")
+	waitForJSONPath(t, 60*time.Second, machineNamespace, "backupjob/mirror-run", "{.status.snapshotPath}", "current")
+	assertPVCFileTree(t, ns, "source-pvc", machineNamespace, "archive-pvc")
+	for _, unexpected := range []string{".partial", "latest", "hourly", "daily", "weekly", "monthly"} {
+		assertPVCPathAbsent(t, machineNamespace, "archive-pvc", unexpected)
+	}
 }
 
 func TestKindOutOfSpaceRecoveryRetriesSource(t *testing.T) {
@@ -592,6 +609,51 @@ func assertPVCFileSize(t *testing.T, namespace, pvcName, path string, want int) 
 	}
 }
 
+func assertPVCFileTree(t *testing.T, sourceNamespace, sourcePVC, targetNamespace, targetPVC string) {
+	t.Helper()
+	sourceManifest := pvcFileManifest(t, sourceNamespace, sourcePVC)
+	targetManifest := pvcFileManifest(t, targetNamespace, targetPVC)
+	if sourceManifest != targetManifest {
+		t.Fatalf("pvc file trees differ:\nsource %s/%s:\n%s\ntarget %s/%s:\n%s", sourceNamespace, sourcePVC, sourceManifest, targetNamespace, targetPVC, targetManifest)
+	}
+}
+
+func pvcFileManifest(t *testing.T, namespace, pvcName string) string {
+	t.Helper()
+	pod := "krm-pvc-read-" + dnsSafe(pvcName)
+	applyYAML(t, pvcToolPodYAML(namespace, pod, pvcName))
+	waitForKubectl(t, 90*time.Second, "pvc manifest pod ready", namespace, "wait", "--for=condition=Ready", "pod/"+pod, "--timeout=90s")
+	t.Cleanup(func() {
+		_, _ = kubectlOutputWithTimeout(namespace, 90*time.Second, "delete", "pod/"+pod, "--wait=true", "--timeout=60s")
+	})
+	command := `cd /data && find . -type f | sort | while IFS= read -r file; do sha256sum "$file"; done`
+	out, err := kubectlOutput(namespace, "exec", pod, "--", "sh", "-c", command)
+	if err != nil {
+		t.Fatalf("build file manifest for pvc %s failed: %v\n%s", pvcName, err, out)
+	}
+	if deleteOut, err := kubectlOutputWithTimeout(namespace, 90*time.Second, "delete", "pod/"+pod, "--wait=true", "--timeout=60s"); err != nil {
+		t.Fatalf("kubectl delete pod/%s failed: %v\n%s", pod, err, deleteOut)
+	}
+	return strings.TrimSpace(out)
+}
+
+func assertPVCPathAbsent(t *testing.T, namespace, pvcName, path string) {
+	t.Helper()
+	pod := "krm-pvc-read-" + dnsSafe(pvcName)
+	applyYAML(t, pvcToolPodYAML(namespace, pod, pvcName))
+	waitForKubectl(t, 90*time.Second, "pvc path check pod ready", namespace, "wait", "--for=condition=Ready", "pod/"+pod, "--timeout=90s")
+	t.Cleanup(func() {
+		_, _ = kubectlOutputWithTimeout(namespace, 90*time.Second, "delete", "pod/"+pod, "--wait=true", "--timeout=60s")
+	})
+	out, err := kubectlOutput(namespace, "exec", pod, "--", "test", "!", "-e", "/data/"+path)
+	if err != nil {
+		t.Fatalf("expected path %s to be absent from pvc %s: %v\n%s", path, pvcName, err, out)
+	}
+	if deleteOut, err := kubectlOutputWithTimeout(namespace, 90*time.Second, "delete", "pod/"+pod, "--wait=true", "--timeout=60s"); err != nil {
+		t.Fatalf("kubectl delete pod/%s failed: %v\n%s", pod, err, deleteOut)
+	}
+}
+
 func pvcToolPodYAML(namespace, name, pvcName string) string {
 	return fmt.Sprintf(`apiVersion: v1
 kind: Pod
@@ -740,6 +802,38 @@ spec:
   pvc: source-pvc
   sourcePath: /
   destinationPath: app/files
+  consistency:
+    capture: Direct
+`, ns, machineNamespace)
+}
+
+func mirrorBackupObjectsYAML(ns string) string {
+	return fmt.Sprintf(`apiVersion: krm.chirino.github.io/v1alpha1
+kind: RsyncMachine
+metadata:
+  name: archive
+  namespace: %[2]s
+spec:
+  pvcName: archive-pvc
+  strategy:
+    type: Mirror
+  concurrencyPolicy: Forbid
+  runHistory:
+    successful: 1
+    failed: 1
+---
+apiVersion: krm.chirino.github.io/v1alpha1
+kind: BackupSource
+metadata:
+  name: files
+  namespace: %[1]s
+spec:
+  machineRef:
+    namespace: %[2]s
+    name: archive
+  pvc: source-pvc
+  sourcePath: /
+  destinationPath: /
   consistency:
     capture: Direct
 `, ns, machineNamespace)

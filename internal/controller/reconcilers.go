@@ -851,7 +851,7 @@ func (r *BackupJobReconciler) reconcileBackupJobJobStatus(ctx context.Context, r
 				phase = krmv1alpha1.RunPhaseRunning
 			} else if backupRunFinalizeCommandSent(run) {
 				if run.Status.SnapshotPath == "" {
-					run.Status.SnapshotPath = backupRunFinalizeSnapshotPath(run)
+					run.Status.SnapshotPath = backupRunSnapshotPathForStrategy(target, run)
 				}
 				phase = krmv1alpha1.RunPhaseSucceeded
 			} else {
@@ -990,6 +990,13 @@ func backupRunFinalizeSnapshotPath(run *krmv1alpha1.BackupJob) string {
 	return "hourly/" + run.Status.LastCommand.SentAt.Time.UTC().Format(finalizeTimeLayout)
 }
 
+func backupRunSnapshotPathForStrategy(target krmv1alpha1.RsyncMachine, run *krmv1alpha1.BackupJob) string {
+	if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror {
+		return krmv1alpha1.DefaultMirrorSnapshot
+	}
+	return backupRunFinalizeSnapshotPath(run)
+}
+
 func (r *BackupJobReconciler) enqueueFinalizeCommand(ctx context.Context, run *krmv1alpha1.BackupJob) error {
 	runSet, _, _, err := r.resolveBackupJob(ctx, run)
 	if err != nil {
@@ -997,10 +1004,14 @@ func (r *BackupJobReconciler) enqueueFinalizeCommand(ctx context.Context, run *k
 	}
 	sources := make([]control.ExpectedSource, 0, len(runSet.Sources))
 	for _, source := range runSet.Sources {
+		destinationPath := source.EffectiveDestinationPath
+		if runSet.Retention.Empty() && destinationPath == "" {
+			destinationPath = "."
+		}
 		sources = append(sources, control.ExpectedSource{
 			Namespace:       source.Source.Namespace,
 			Name:            source.Source.Name,
-			DestinationPath: source.EffectiveDestinationPath,
+			DestinationPath: destinationPath,
 		})
 	}
 	commandID := "finalize-" + dnsLabel(run.Name)
@@ -2033,6 +2044,12 @@ func (r *RestoreJobReconciler) failRestoreJob(ctx context.Context, run *krmv1alp
 }
 
 func resolveRestoreSnapshot(requested string, target krmv1alpha1.RsyncMachine) (string, error) {
+	if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror {
+		if requested == "" || requested == krmv1alpha1.DefaultSnapshot || requested == krmv1alpha1.DefaultMirrorSnapshot {
+			return krmv1alpha1.DefaultMirrorSnapshot, nil
+		}
+		return "", fmt.Errorf("mirror RsyncMachine %s/%s only supports snapshot %q", target.Namespace, target.Name, krmv1alpha1.DefaultMirrorSnapshot)
+	}
 	if requested == "" {
 		requested = krmv1alpha1.DefaultSnapshot
 	}
@@ -2344,6 +2361,13 @@ func (r *RsyncMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 	changed := false
+	if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror && (len(target.Status.RestorePoints) > 0 || target.Status.RestorePointCount != 0) {
+		target.Status.RestorePoints = nil
+		target.Status.RestorePointCount = 0
+		now := metav1.Now()
+		target.Status.RestorePointsUpdatedAt = &now
+		changed = true
+	}
 	if target.Spec.PVCName == "" {
 		changed = setCondition(&target.Status.Conditions, ConditionValid, metav1.ConditionFalse, ReasonInvalidSpec, "spec.pvcName is required", target.Generation) || changed
 		changed = setCondition(&target.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonInvalidSpec, "RsyncMachine PVC is not configured", target.Generation) || changed
@@ -2526,6 +2550,14 @@ func (r *RsyncMachineReconciler) deleteScheduledBackupJobsForMachine(ctx context
 }
 
 func (r *RsyncMachineReconciler) validateRsyncMachineSources(ctx context.Context, machine krmv1alpha1.RsyncMachine) (metav1.ConditionStatus, string, string) {
+	switch machine.Spec.Strategy.TypeOrDefault() {
+	case krmv1alpha1.BackupStrategySnapshot, krmv1alpha1.BackupStrategyMirror:
+	default:
+		return metav1.ConditionFalse, ReasonInvalidSpec, fmt.Sprintf("spec.strategy.type %q is not supported", machine.Spec.Strategy.Type)
+	}
+	if machine.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror && !machine.Spec.Retention.Empty() {
+		return metav1.ConditionFalse, ReasonInvalidSpec, "spec.retention must be empty when spec.strategy.type is Mirror"
+	}
 	var sourceList krmv1alpha1.BackupSourceList
 	if err := r.List(ctx, &sourceList); err != nil {
 		return metav1.ConditionUnknown, ReasonMissingReference, fmt.Sprintf("BackupSources could not be listed: %v", err)
@@ -2542,12 +2574,21 @@ func (r *RsyncMachineReconciler) validateRsyncMachineSources(ctx context.Context
 			continue
 		}
 		found = true
-		if _, err := EffectiveDestinationPath(source); err != nil {
+		if _, err := EffectiveDestinationPathForStrategy(machine, source); err != nil {
 			return metav1.ConditionFalse, ReasonInvalidSpec, fmt.Sprintf("BackupSource %s has invalid destinationPath: %v", sourceRef.String(), err)
 		}
 	}
 	if !found {
 		return metav1.ConditionFalse, ReasonInvalidSpec, "at least one BackupSource must reference this RsyncMachine"
+	}
+	sourcesByRef := make(map[types.NamespacedName]krmv1alpha1.BackupSource, len(sourceList.Items))
+	for _, source := range sourceList.Items {
+		sourcesByRef[types.NamespacedName{Namespace: source.Namespace, Name: source.Name}] = source
+	}
+	if overlaps, err := DetectMirrorDestinationPathOverlaps(machine, sourcesByRef); err != nil {
+		return metav1.ConditionFalse, ReasonInvalidSpec, err.Error()
+	} else if len(overlaps) > 0 {
+		return metav1.ConditionFalse, ReasonInvalidSpec, fmt.Sprintf("mirror target path overlap at %q with delete enabled for sources %s", overlaps[0].Path, namespacedNameList(overlaps[0].Sources))
 	}
 	return metav1.ConditionTrue, ReasonResolvedReferences, "RsyncMachine references resolved successfully"
 }

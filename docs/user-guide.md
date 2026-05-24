@@ -43,6 +43,12 @@ Snapshots are stored on the target PVC in a hardlink-based layout:
   tier aliases created from successful backup jobs according to retention
   settings. Weekly snapshots use the Monday that starts the week.
 
+Machines can also use `spec.strategy.type: Mirror`. Mirror machines rsync each
+source directly into the target PVC tree and keep only the current state. They
+do not create `.partial`, `latest`, timestamped restore point directories, or
+retention tiers. In mirror mode, `BackupSource.spec.destinationPath` is relative
+to the target PVC root; empty or `/` means the root itself.
+
 ## Install the Operator
 
 Build or publish the image you want the cluster to use, then install the CRDs,
@@ -90,13 +96,15 @@ spec:
 
 Important source fields:
 
-- `spec.machineRef`: `RsyncMachine` that stores snapshots for this source.
+- `spec.machineRef`: `RsyncMachine` that stores snapshots or a mirror for this
+  source.
 - `spec.pvc`: source PVC to mount and back up.
 - `spec.sourcePath`: path inside the source PVC. Defaults to `/`.
 - `spec.destinationPath`: relative path under each snapshot where this source is
   written, after the source namespace prefix. Defaults to the namespace root.
   `destinationPath: files` writes under `<source-namespace>/files`; omit it or
   set it to `/` to write under `<source-namespace>`.
+  For mirror machines, this path is relative to the target PVC root instead.
 - `spec.consistency.capture`: `Direct`, `VolumeSnapshot`, or `Auto`. Defaults
   to `Auto`, which uses CSI `VolumeSnapshot` when available and falls back to
   direct rsync.
@@ -140,6 +148,26 @@ Scheduling fields such as `nodeSelector`, `affinity`, `tolerations`,
 `imagePullSecrets` is applied to generated Jobs that use the image.
 `securityContext` is applied to generated pods, and `resources` is applied to
 generated containers.
+
+For a current-state mirror target, set `spec.strategy.type: Mirror` and omit
+retention:
+
+```yaml
+apiVersion: krm.chirino.github.io/v1alpha1
+kind: RsyncMachine
+metadata:
+  name: app-mirror
+  namespace: kube-rsync-machine
+spec:
+  pvcName: app-mirror-target
+  strategy:
+    type: Mirror
+```
+
+With mirror machines, overlapping source `destinationPath` values are allowed
+only when all overlapping sources set `spec.rsync.delete: false`. The default
+`delete: true` makes a source path an exact mirror and is rejected when it could
+delete files owned by another source.
 
 Apply the resources:
 
@@ -221,7 +249,8 @@ kubectl --context <cluster-context> apply -f restore-run.yaml
 
 Restore defaults:
 
-- `spec.snapshot` defaults to `latest`.
+- `spec.snapshot` defaults to `latest` for snapshot machines. For mirror
+  machines, omit it to restore from the current mirror.
 - `spec.overrides.destination.namespace` defaults to the source namespace.
 - `spec.overrides.destination.pvcName` defaults to the source PVC.
 - `spec.overrides.destination.path` defaults to the source path.

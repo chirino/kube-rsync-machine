@@ -34,6 +34,12 @@ type DestinationPathConflict struct {
 	Machines        []types.NamespacedName
 }
 
+type DestinationPathOverlap struct {
+	MachineRef types.NamespacedName
+	Path       string
+	Sources    []types.NamespacedName
+}
+
 func ResolveObjectReference(ref krmv1alpha1.ObjectReference, defaultNamespace string) (types.NamespacedName, error) {
 	if ref.Name == "" {
 		return types.NamespacedName{}, errors.New("reference name is required")
@@ -47,6 +53,13 @@ func ResolveObjectReference(ref krmv1alpha1.ObjectReference, defaultNamespace st
 
 func EffectiveDestinationPath(source krmv1alpha1.BackupSource) (string, error) {
 	return effectiveDestinationPath(source.Namespace, source.Spec.DestinationPath)
+}
+
+func EffectiveDestinationPathForStrategy(machine krmv1alpha1.RsyncMachine, source krmv1alpha1.BackupSource) (string, error) {
+	if machine.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror {
+		return effectiveMirrorDestinationPath(source.Spec.DestinationPath)
+	}
+	return EffectiveDestinationPath(source)
 }
 
 func effectiveDestinationPath(sourceNamespace, destinationPath string) (string, error) {
@@ -63,6 +76,17 @@ func effectiveDestinationPath(sourceNamespace, destinationPath string) (string, 
 	return path.Join(sourceNamespace, cleaned), nil
 }
 
+func effectiveMirrorDestinationPath(destinationPath string) (string, error) {
+	if destinationPath == "" || destinationPath == "/" {
+		return "", nil
+	}
+	cleaned, err := cleanRelativePath(destinationPath)
+	if err != nil {
+		return "", err
+	}
+	return cleaned, nil
+}
+
 func PartialDestinationPath(runID string, source krmv1alpha1.BackupSource) (string, error) {
 	if runID == "" {
 		return "", errors.New("run ID is required")
@@ -72,6 +96,20 @@ func PartialDestinationPath(runID string, source krmv1alpha1.BackupSource) (stri
 		return "", err
 	}
 	return path.Join(".partial", runID, effective), nil
+}
+
+func TransferDestinationPath(machine krmv1alpha1.RsyncMachine, runID string, source krmv1alpha1.BackupSource) (string, error) {
+	if machine.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror {
+		effective, err := EffectiveDestinationPathForStrategy(machine, source)
+		if err != nil {
+			return "", err
+		}
+		if effective == "" {
+			return ".", nil
+		}
+		return effective, nil
+	}
+	return PartialDestinationPath(runID, source)
 }
 
 func TargetReady(target krmv1alpha1.RsyncMachine) bool {
@@ -153,6 +191,9 @@ func DetectDestinationPathConflicts(machines []krmv1alpha1.RsyncMachine, sources
 			if resolvedMachineRef != machineRef {
 				continue
 			}
+			if machine.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror {
+				continue
+			}
 			cleanedPath, err := cleanRelativePath(source.Spec.DestinationPath)
 			if err != nil {
 				return nil, fmt.Errorf("source %s destination path: %w", sourceRef.String(), err)
@@ -192,14 +233,113 @@ func DetectDestinationPathConflicts(machines []krmv1alpha1.RsyncMachine, sources
 	return conflicts, nil
 }
 
+func DetectMirrorDestinationPathOverlaps(machine krmv1alpha1.RsyncMachine, sources map[types.NamespacedName]krmv1alpha1.BackupSource) ([]DestinationPathOverlap, error) {
+	if machine.Spec.Strategy.TypeOrDefault() != krmv1alpha1.BackupStrategyMirror {
+		return nil, nil
+	}
+	machineRef := types.NamespacedName{Namespace: machine.Namespace, Name: machine.Name}
+	type claim struct {
+		path   string
+		source types.NamespacedName
+		delete bool
+	}
+	var claims []claim
+	for _, source := range sources {
+		sourceRef := types.NamespacedName{Namespace: source.Namespace, Name: source.Name}
+		resolvedMachineRef, err := ResolveObjectReference(source.Spec.MachineRef, source.Namespace)
+		if err != nil {
+			continue
+		}
+		if resolvedMachineRef != machineRef {
+			continue
+		}
+		effective, err := effectiveMirrorDestinationPath(source.Spec.DestinationPath)
+		if err != nil {
+			return nil, fmt.Errorf("source %s destination path: %w", sourceRef.String(), err)
+		}
+		claims = append(claims, claim{path: effective, source: sourceRef, delete: source.Spec.Rsync.DeleteOrDefault()})
+	}
+	overlapByKey := map[string]DestinationPathOverlap{}
+	for i := range claims {
+		for j := i + 1; j < len(claims); j++ {
+			if !mirrorPathsOverlap(claims[i].path, claims[j].path) || (!claims[i].delete && !claims[j].delete) {
+				continue
+			}
+			pathKey := mirrorOverlapPath(claims[i].path, claims[j].path)
+			key := machineRef.String() + "\x00" + pathKey
+			overlap := overlapByKey[key]
+			overlap.MachineRef = machineRef
+			overlap.Path = pathKey
+			seen := map[types.NamespacedName]struct{}{}
+			for _, ref := range overlap.Sources {
+				seen[ref] = struct{}{}
+			}
+			for _, ref := range []types.NamespacedName{claims[i].source, claims[j].source} {
+				if _, ok := seen[ref]; ok {
+					continue
+				}
+				overlap.Sources = append(overlap.Sources, ref)
+				seen[ref] = struct{}{}
+			}
+			sort.Slice(overlap.Sources, func(a, b int) bool {
+				return overlap.Sources[a].String() < overlap.Sources[b].String()
+			})
+			overlapByKey[key] = overlap
+		}
+	}
+	overlaps := make([]DestinationPathOverlap, 0, len(overlapByKey))
+	for _, overlap := range overlapByKey {
+		overlaps = append(overlaps, overlap)
+	}
+	sort.Slice(overlaps, func(i, j int) bool {
+		if overlaps[i].Path == overlaps[j].Path {
+			return overlaps[i].MachineRef.String() < overlaps[j].MachineRef.String()
+		}
+		return overlaps[i].Path < overlaps[j].Path
+	})
+	return overlaps, nil
+}
+
+func mirrorPathsOverlap(a, b string) bool {
+	if a == "" || b == "" {
+		return true
+	}
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
+func mirrorOverlapPath(a, b string) string {
+	if a == "" || b == "" {
+		return "/"
+	}
+	if len(a) <= len(b) && (a == b || strings.HasPrefix(b, a+"/")) {
+		return a
+	}
+	return b
+}
+
 func CalculateTargetRunSet(machine krmv1alpha1.RsyncMachine, sources map[types.NamespacedName]krmv1alpha1.BackupSource) (TargetRunSet, error) {
 	machineRef := types.NamespacedName{Namespace: machine.Namespace, Name: machine.Name}
+	switch machine.Spec.Strategy.TypeOrDefault() {
+	case krmv1alpha1.BackupStrategySnapshot, krmv1alpha1.BackupStrategyMirror:
+	default:
+		return TargetRunSet{}, fmt.Errorf("spec.strategy.type %q is not supported", machine.Spec.Strategy.Type)
+	}
+	if machine.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror && !machine.Spec.Retention.Empty() {
+		return TargetRunSet{}, fmt.Errorf("spec.retention must be empty when spec.strategy.type is Mirror")
+	}
 	conflicts, err := DetectDestinationPathConflicts([]krmv1alpha1.RsyncMachine{machine}, sources)
 	if err != nil {
 		return TargetRunSet{}, err
 	}
 	if len(conflicts) > 0 {
 		return TargetRunSet{}, fmt.Errorf("target path conflict for %s/%s on %s", conflicts[0].SourceNamespace, conflicts[0].DestinationPath, conflicts[0].MachineRef.String())
+	}
+	overlaps, err := DetectMirrorDestinationPathOverlaps(machine, sources)
+	if err != nil {
+		return TargetRunSet{}, err
+	}
+	if len(overlaps) > 0 {
+		return TargetRunSet{}, fmt.Errorf("mirror target path overlap at %q on %s with delete enabled for sources %s", overlaps[0].Path, overlaps[0].MachineRef.String(), namespacedNameList(overlaps[0].Sources))
 	}
 
 	runSet := TargetRunSet{
@@ -220,7 +360,7 @@ func CalculateTargetRunSet(machine krmv1alpha1.RsyncMachine, sources map[types.N
 		if _, ok := sourcesByRef[sourceRef]; ok {
 			continue
 		}
-		effectivePath, err := EffectiveDestinationPath(source)
+		effectivePath, err := EffectiveDestinationPathForStrategy(machine, source)
 		if err != nil {
 			return TargetRunSet{}, fmt.Errorf("source %s destination path: %w", sourceRef.String(), err)
 		}
@@ -275,4 +415,12 @@ func sortedNamespacedNames(values map[types.NamespacedName]struct{}) []types.Nam
 
 func conflictKey(conflict DestinationPathConflict) string {
 	return strings.Join([]string{conflict.MachineRef.String(), conflict.SourceNamespace, conflict.DestinationPath}, "\x00")
+}
+
+func namespacedNameList(values []types.NamespacedName) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, value.String())
+	}
+	return strings.Join(parts, ",")
 }

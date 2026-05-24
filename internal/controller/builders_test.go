@@ -59,6 +59,46 @@ func TestBuildServeTargetJob(t *testing.T) {
 	}
 }
 
+func TestBuildMirrorDataPlaneJobsUseRootRelativeTargets(t *testing.T) {
+	run := backupRun("backup", "demo-20260520", ref("backup", "demo"))
+	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	target.Spec.Strategy.Type = krmv1alpha1.BackupStrategyMirror
+	source := backupSource("app-prod", "files", "data", "/")
+	runSet := TargetRunSet{
+		Sources: []ResolvedSource{{
+			Source:                   source,
+			EffectiveDestinationPath: "",
+		}},
+	}
+
+	targetJob, err := BuildServeTargetJob(run, target, runSet, "krm:test", "2026-05-20T10-00-00Z")
+	if err != nil {
+		t.Fatalf("BuildServeTargetJob returned error: %v", err)
+	}
+	targetArgs := targetJob.Spec.Template.Spec.Containers[0].Args
+	for _, want := range []string{"--strategy", "mirror", "--source", "app-prod/files=."} {
+		if !contains(targetArgs, want) {
+			t.Fatalf("expected arg %q in %#v", want, targetArgs)
+		}
+	}
+	for _, unexpected := range []string{"--retention-hourly", "--timestamp"} {
+		if contains(targetArgs, unexpected) {
+			t.Fatalf("did not expect arg %q in %#v", unexpected, targetArgs)
+		}
+	}
+
+	sourceJob, err := BuildSendSourceJob(run, source, target, SourceJobOptions{}, "krm:test")
+	if err != nil {
+		t.Fatalf("BuildSendSourceJob returned error: %v", err)
+	}
+	sourceArgs := sourceJob.Spec.Template.Spec.Containers[0].Args
+	for _, want := range []string{"--source", "/source", "--target", "."} {
+		if !contains(sourceArgs, want) {
+			t.Fatalf("expected source arg %q in %#v", want, sourceArgs)
+		}
+	}
+}
+
 func TestBuildServeTargetJobAppliesTargetScheduling(t *testing.T) {
 	run := backupRun("backup", "demo-20260520", ref("backup", "demo"))
 	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
@@ -180,6 +220,43 @@ func TestBuildDataPlaneJobsUseMachineImageOverride(t *testing.T) {
 	} {
 		if job != target.Spec.Image {
 			t.Fatalf("expected %s job to use image %q, got %q", name, target.Spec.Image, job)
+		}
+	}
+}
+
+func TestBuildMirrorRestoreJobsUseCurrentSnapshot(t *testing.T) {
+	restore := krmv1alpha1.RestoreJob{
+		ObjectMeta: objectMeta("backup", "restore-files"),
+		Spec: krmv1alpha1.RestoreJobSpec{
+			SourceRef: ref("app-prod", "files"),
+		},
+		Status: krmv1alpha1.RestoreJobStatus{
+			RestoredSnapshot: krmv1alpha1.DefaultMirrorSnapshot,
+		},
+	}
+	source := backupSource("app-prod", "files", "data-pvc", "/")
+	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	target.Spec.Strategy.Type = krmv1alpha1.BackupStrategyMirror
+
+	restoreTargetJob, err := BuildRestoreTargetJob(restore, source, target, "krm:test")
+	if err != nil {
+		t.Fatalf("BuildRestoreTargetJob returned error: %v", err)
+	}
+	targetArgs := restoreTargetJob.Spec.Template.Spec.Containers[0].Args
+	for _, want := range []string{"--restore-snapshot", "current", "--restore-source", "."} {
+		if !contains(targetArgs, want) {
+			t.Fatalf("expected restore target arg %q in %#v", want, targetArgs)
+		}
+	}
+
+	restoreJob, err := BuildRestoreJob(restore, source, target, "krm:test")
+	if err != nil {
+		t.Fatalf("BuildRestoreJob returned error: %v", err)
+	}
+	restoreArgs := restoreJob.Spec.Template.Spec.Containers[0].Args
+	for _, want := range []string{"--snapshot", "current", "--snapshot-source", "."} {
+		if !contains(restoreArgs, want) {
+			t.Fatalf("expected restore arg %q in %#v", want, restoreArgs)
 		}
 	}
 }

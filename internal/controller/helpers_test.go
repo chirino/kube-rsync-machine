@@ -42,6 +42,32 @@ func TestEffectiveDestinationPath(t *testing.T) {
 	}
 }
 
+func TestEffectiveMirrorDestinationPath(t *testing.T) {
+	machine := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	machine.Spec.Strategy.Type = krmv1alpha1.BackupStrategyMirror
+	tests := []struct {
+		name            string
+		destinationPath string
+		want            string
+	}{
+		{name: "nested path", destinationPath: "sites/demo-app/files", want: "sites/demo-app/files"},
+		{name: "empty path", destinationPath: "", want: ""},
+		{name: "root path", destinationPath: "/", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := backupSource("app-prod", "files", "data", test.destinationPath)
+			got, err := EffectiveDestinationPathForStrategy(machine, source)
+			if err != nil {
+				t.Fatalf("EffectiveDestinationPathForStrategy returned error: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("unexpected path %q", got)
+			}
+		})
+	}
+}
+
 func TestEffectiveDestinationPathRejectsUnsafePath(t *testing.T) {
 	tests := []string{"/absolute", "../escape", "nested/../../escape"}
 	for _, test := range tests {
@@ -101,6 +127,42 @@ func TestDetectDestinationPathConflictsAllowsSameSourceInMultiplePlans(t *testin
 	}
 }
 
+func TestDetectMirrorDestinationPathOverlaps(t *testing.T) {
+	disabled := false
+	tests := []struct {
+		name    string
+		paths   []string
+		delete  []bool
+		wantHit bool
+	}{
+		{name: "root overlaps nested", paths: []string{"/", "app"}, wantHit: true},
+		{name: "parent overlaps child", paths: []string{"app", "app/data"}, wantHit: true},
+		{name: "prefix does not overlap", paths: []string{"app-a", "app"}, wantHit: false},
+		{name: "overlap allowed without delete", paths: []string{"app", "app/data"}, delete: []bool{false, false}, wantHit: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			machine := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+			machine.Spec.Strategy.Type = krmv1alpha1.BackupStrategyMirror
+			sources := map[types.NamespacedName]krmv1alpha1.BackupSource{}
+			for i, path := range test.paths {
+				source := backupSourceForMachine("app-prod", string(rune('a'+i)), "data", path, ref("backup", "archive"))
+				if i < len(test.delete) && !test.delete[i] {
+					source.Spec.Rsync.Delete = &disabled
+				}
+				sources[types.NamespacedName{Namespace: source.Namespace, Name: source.Name}] = source
+			}
+			overlaps, err := DetectMirrorDestinationPathOverlaps(machine, sources)
+			if err != nil {
+				t.Fatalf("DetectMirrorDestinationPathOverlaps returned error: %v", err)
+			}
+			if (len(overlaps) > 0) != test.wantHit {
+				t.Fatalf("unexpected overlaps: %#v", overlaps)
+			}
+		})
+	}
+}
+
 func TestCalculateTargetRunSet(t *testing.T) {
 	machine := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{Hourly: 24, Daily: 7, Weekly: 8, Monthly: 12})
 	sources := map[types.NamespacedName]krmv1alpha1.BackupSource{
@@ -124,6 +186,31 @@ func TestCalculateTargetRunSet(t *testing.T) {
 	wantRetention := krmv1alpha1.RetentionPolicy{Hourly: 24, Daily: 7, Weekly: 8, Monthly: 12}
 	if runSet.Retention != wantRetention {
 		t.Fatalf("unexpected retention: %#v", runSet.Retention)
+	}
+}
+
+func TestCalculateTargetRunSetUsesMirrorPaths(t *testing.T) {
+	machine := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	machine.Spec.Strategy.Type = krmv1alpha1.BackupStrategyMirror
+	deleteDisabled := false
+	root := backupSourceForMachine("app-prod", "root", "data", "/", ref("backup", "archive"))
+	root.Spec.Rsync.Delete = &deleteDisabled
+	app := backupSourceForMachine("app-prod", "app", "data", "app", ref("backup", "archive"))
+	app.Spec.Rsync.Delete = &deleteDisabled
+	sources := map[types.NamespacedName]krmv1alpha1.BackupSource{
+		{Namespace: "app-prod", Name: "root"}: root,
+		{Namespace: "app-prod", Name: "app"}:  app,
+	}
+
+	runSet, err := CalculateTargetRunSet(machine, sources)
+	if err != nil {
+		t.Fatalf("CalculateTargetRunSet returned error: %v", err)
+	}
+	if got := runSet.Sources[0].EffectiveDestinationPath; got != "app" {
+		t.Fatalf("unexpected first mirror path %q", got)
+	}
+	if got := runSet.Sources[1].EffectiveDestinationPath; got != "" {
+		t.Fatalf("unexpected root mirror path %q", got)
 	}
 }
 

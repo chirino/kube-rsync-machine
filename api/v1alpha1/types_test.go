@@ -25,6 +25,15 @@ func TestAddToSchemeRegistersKnownTypes(t *testing.T) {
 	}
 }
 
+func TestBackupStrategyTypeDefaultsToSnapshot(t *testing.T) {
+	if got := (BackupStrategy{}).TypeOrDefault(); got != BackupStrategySnapshot {
+		t.Fatalf("default strategy = %q, want %q", got, BackupStrategySnapshot)
+	}
+	if got := (BackupStrategy{Type: BackupStrategyMirror}).TypeOrDefault(); got != BackupStrategyMirror {
+		t.Fatalf("explicit strategy = %q, want %q", got, BackupStrategyMirror)
+	}
+}
+
 func TestRsyncMachineDeepCopyIsIndependent(t *testing.T) {
 	now := metav1.Now()
 	original := &RsyncMachine{

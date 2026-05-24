@@ -138,6 +138,7 @@ type RunHistory = {
 
 type MachineSpec = {
   pvcName?: string;
+  strategy?: { type?: string };
   schedule?: string;
   concurrencyPolicy?: string;
   retention?: RetentionPolicy;
@@ -317,9 +318,20 @@ function objectByRef<T extends KubeObject>(items: T[], ref: Ref | undefined, def
   return items.find((item) => refsEqual(ref, defaultNamespace, item.metadata));
 }
 
-function targetPath(ref: Ref, source: KubeObject<SourceSpec> | undefined, defaultNamespace: string) {
-  const sourceNamespace = ref.namespace || source?.metadata.namespace || defaultNamespace;
+function machineStrategy(machine: KubeObject<MachineSpec, MachineStatus>) {
+  return machine.spec?.strategy?.type || "Snapshot";
+}
+
+function isMirrorMachine(machine: KubeObject<MachineSpec, MachineStatus>) {
+  return machineStrategy(machine) === "Mirror";
+}
+
+function targetPath(machine: KubeObject<MachineSpec, MachineStatus>, ref: Ref, source: KubeObject<SourceSpec> | undefined, defaultNamespace: string) {
   const destinationPath = source?.spec?.destinationPath || "";
+  if (isMirrorMachine(machine)) {
+    return destinationPath && destinationPath !== "/" ? destinationPath : "/";
+  }
+  const sourceNamespace = ref.namespace || source?.metadata.namespace || defaultNamespace;
   return [sourceNamespace, destinationPath].filter(Boolean).join("/") || "-";
 }
 
@@ -334,7 +346,7 @@ function restoreJobYaml(
   const sourcePVC = sourceItem.source?.spec?.pvc || "restore-target-pvc";
   const sourcePath = sourceItem.source?.spec?.sourcePath || "/";
   const name = dnsName(`restore-${machine.metadata.name}-${sourceName}-${point.snapshot}`);
-  return [
+  const lines = [
     "apiVersion: krm.chirino.github.io/v1alpha1",
     "kind: RestoreJob",
     "metadata:",
@@ -343,7 +355,6 @@ function restoreJobYaml(
     "spec:",
     "  sourceRef:",
     `    name: ${sourceName}`,
-    `  snapshot: ${yamlString(point.snapshot)}`,
     "# Uncomment overrides if restoring to a different destination or rsync behavior.",
     "# overrides:",
     "#   destination:",
@@ -351,7 +362,11 @@ function restoreJobYaml(
     `#     path: ${yamlString(sourcePath)}`,
     "#   rsync:",
     "#     delete: false",
-  ].join("\n");
+  ];
+  if (point.snapshot !== "current") {
+    lines.splice(8, 0, `  snapshot: ${yamlString(point.snapshot)}`);
+  }
+  return lines.join("\n");
 }
 
 function dnsName(value: string) {
@@ -1129,6 +1144,8 @@ function MachineCard({ group, progress }: { group: MachineGroup; progress: Progr
             <Tip label="Namespace">{group.machine.metadata.namespace || "-"}</Tip>
             <span className="h-0.5 w-0.5 rounded-full bg-stone2-300" />
             <Tip label="PVC">{group.machine.spec?.pvcName || "-"}</Tip>
+            <span className="h-0.5 w-0.5 rounded-full bg-stone2-300" />
+            <Tip label="Strategy">{machineStrategy(group.machine)}</Tip>
           </div>
         </div>
 
@@ -1163,7 +1180,7 @@ function MachineCard({ group, progress }: { group: MachineGroup; progress: Progr
                   <span>&middot;</span>
                   <Tip label="Source Path">{source?.spec?.sourcePath || "/"}</Tip>
                   <ArrowRight size={10} className="shrink-0 text-stone2-300" />
-                  <Tip label="Target Path" className="break-all">{targetPath(ref, source, "")}</Tip>
+                  <Tip label="Target Path" className="break-all">{targetPath(group.machine, ref, source, "")}</Tip>
                 </div>
               </div>
             ))}
@@ -1205,8 +1222,12 @@ function ScheduleDetails({ machine }: { machine: KubeObject<MachineSpec, Machine
         <Tip label={concurrencyDescription(concurrency)} className="ml-1 text-stone2-700">{concurrency}</Tip>
       </div>
       <div>
+        <span className="text-xs text-stone2-400">Strategy</span>{" "}
+        <Tip label={strategyDescription(machineStrategy(machine))} className="ml-1 text-stone2-700">{machineStrategy(machine)}</Tip>
+      </div>
+      <div>
         <span className="text-xs text-stone2-400">Restore Points</span>{" "}
-        <RetentionDetails retention={spec?.retention} />
+        {isMirrorMachine(machine) ? <span className="ml-1 text-stone2-700">current mirror</span> : <RetentionDetails retention={spec?.retention} />}
       </div>
       <div>
         <span className="text-xs text-stone2-400">Runs</span>{" "}
@@ -1247,6 +1268,8 @@ function RestorePointsSection({
   });
   const [selectedPoint, setSelectedPoint] = useState<RestorePoint | undefined>();
   const [selectedSource, setSelectedSource] = useState<{ ref: Ref; source?: KubeObject<SourceSpec> } | undefined>();
+  const mirror = isMirrorMachine(machine);
+  const currentMirrorPoint: RestorePoint = { snapshot: "current" };
   const groups = groupRestorePoints(points);
   const hasPoints = groups.some((group) => group.points.length > 0);
   function toggleGroup(groupKey: string) {
@@ -1260,10 +1283,25 @@ function RestorePointsSection({
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="section-line" />
-          <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-stone2-400">Restore Points</span>
+          <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-stone2-400">{mirror ? "Current Mirror" : "Restore Points"}</span>
         </div>
-        <span className="text-xs text-stone2-300">{count.toLocaleString()}</span>
+        <span className="text-xs text-stone2-300">{mirror ? "current" : count.toLocaleString()}</span>
       </div>
+      {mirror ? (
+        <div className="flex items-center justify-between rounded-md border border-parchment-200 bg-parchment-100 px-4 py-3">
+          <div>
+            <Tip label="Snapshot" className="text-sm text-stone2-700">current</Tip>
+            <div className="mt-0.5 text-[11px] text-stone2-400">Target PVC contains the latest mirror state.</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSelectedPoint(currentMirrorPoint)}
+            className="rounded px-2.5 py-1 text-[11px] font-medium text-stone2-600 bg-white border border-parchment-300 hover:border-sage-400 transition"
+          >
+            Restore
+          </button>
+        </div>
+      ) : (
       <div className="overflow-hidden rounded-md border border-parchment-200">
         {!hasPoints ? <div className="p-3"><EmptySmall label="No restore points reported" /></div> : null}
         <div>
@@ -1278,10 +1316,12 @@ function RestorePointsSection({
           ))}
         </div>
       </div>
+      )}
       {selectedPoint && !selectedSource ? (
 
         <SourcePickerModal
           point={selectedPoint}
+          machine={machine}
           sources={sources}
           namespace={namespace}
           onClose={() => setSelectedPoint(undefined)}
@@ -1368,12 +1408,14 @@ function RestorePointRow({ point, onRestore }: { point: RestorePoint; onRestore:
 
 function SourcePickerModal({
   point,
+  machine,
   sources,
   namespace,
   onClose,
   onSelect,
 }: {
   point: RestorePoint;
+  machine: KubeObject<MachineSpec, MachineStatus>;
   sources: Array<{ ref: Ref; source?: KubeObject<SourceSpec> }>;
   namespace: string;
   onClose: () => void;
@@ -1401,7 +1443,7 @@ function SourcePickerModal({
               <Field label="PVC" value={item.source?.spec?.pvc || "-"} />
               <Field label="Capture" value={item.source?.spec?.consistency?.capture || "Auto"} />
               <Field label="Source Path" value={item.source?.spec?.sourcePath || "/"} />
-              <Field label="Target Path" value={targetPath(item.ref, item.source, namespace)} />
+              <Field label="Target Path" value={targetPath(machine, item.ref, item.source, namespace)} />
             </div>
           </button>
         ))}
@@ -2032,6 +2074,17 @@ function concurrencyDescription(policy: string) {
       return "Cancel the active scheduled backup and replace it with the new scheduled run.";
     default:
       return `Concurrency policy: ${policy}`;
+  }
+}
+
+function strategyDescription(strategy: string) {
+  switch (strategy) {
+    case "Mirror":
+      return "Keep only the current target PVC tree; no timestamped restore points are retained.";
+    case "Snapshot":
+      return "Keep timestamped restore points with retention tiers.";
+    default:
+      return `Backup strategy: ${strategy}`;
   }
 }
 

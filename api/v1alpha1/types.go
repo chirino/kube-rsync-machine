@@ -9,6 +9,7 @@ const (
 	DefaultRsyncMachineMountPath = "/backup"
 	DefaultSourcePath            = "/"
 	DefaultSnapshot              = "latest"
+	DefaultMirrorSnapshot        = "current"
 	DefaultSuccessfulRunHistory  = 5
 	DefaultFailedRunHistory      = 5
 )
@@ -33,6 +34,13 @@ type CleanupPolicy string
 const (
 	CleanupPolicyDelete          CleanupPolicy = "Delete"
 	CleanupPolicyRetainOnFailure CleanupPolicy = "RetainOnFailure"
+)
+
+type BackupStrategyType string
+
+const (
+	BackupStrategySnapshot BackupStrategyType = "Snapshot"
+	BackupStrategyMirror   BackupStrategyType = "Mirror"
 )
 
 type BackupJobTrigger string
@@ -86,6 +94,21 @@ type RetentionPolicy struct {
 	Monthly int `json:"monthly,omitempty"`
 }
 
+func (p RetentionPolicy) Empty() bool {
+	return p.Hourly == 0 && p.Daily == 0 && p.Weekly == 0 && p.Monthly == 0
+}
+
+type BackupStrategy struct {
+	Type BackupStrategyType `json:"type,omitempty"`
+}
+
+func (s BackupStrategy) TypeOrDefault() BackupStrategyType {
+	if s.Type != "" {
+		return s.Type
+	}
+	return BackupStrategySnapshot
+}
+
 type RsyncOptions struct {
 	Delete        *bool `json:"delete,omitempty"`
 	OneFileSystem *bool `json:"oneFileSystem,omitempty"`
@@ -127,6 +150,7 @@ type RsyncMachineList struct {
 type RsyncMachineSpec struct {
 	PVCName                   string                            `json:"pvcName"`
 	Image                     string                            `json:"image,omitempty"`
+	Strategy                  BackupStrategy                    `json:"strategy,omitempty"`
 	Schedule                  string                            `json:"schedule,omitempty"`
 	ConcurrencyPolicy         ConcurrencyPolicy                 `json:"concurrencyPolicy,omitempty"`
 	Retention                 RetentionPolicy                   `json:"retention,omitempty"`

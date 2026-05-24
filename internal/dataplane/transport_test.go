@@ -79,6 +79,73 @@ func TestMTLSTransferWritesOnlyAssignedPartialSubtree(t *testing.T) {
 	}
 }
 
+func TestMTLSMirrorTransferWritesDirectlyToTargetRoot(t *testing.T) {
+	ca, err := tlsutil.NewRunCA("backup", "run-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetBundle, err := ca.Mint(tlsutil.TargetIdentity("backup", "run-1", "backup", "archive"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceIdentity := tlsutil.SourceIdentity("backup", "run-1", "app", "files")
+	sourceBundle, err := ca.Mint(sourceIdentity, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "nested", "data.txt"), []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := t.TempDir()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ServeTargetReceiver(ctx, listener, TargetReceiverOptions{
+			TargetRoot: targetRoot,
+			RunID:      "backup-run-1",
+			Mirror:     true,
+			TLSBundle:  targetBundle,
+			Sources: []ExpectedTransferSource{{
+				Identity:    sourceIdentity,
+				Destination: ".",
+			}},
+		})
+	}()
+	if err := SendSource(ctx, SourceSenderOptions{
+		Source:         sourceRoot,
+		Destination:    ".",
+		TargetEndpoint: listener.Addr().String(),
+		TLSBundle:      sourceBundle,
+		ExpectedTarget: tlsutil.TargetIdentity("backup", "run-1", "backup", "archive"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(targetRoot, "nested", "data.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("expected transferred payload, got %q", string(data))
+	}
+	for _, unexpected := range []string{".partial", "latest", "hourly", "daily", "weekly", "monthly"} {
+		if _, err := os.Stat(filepath.Join(targetRoot, unexpected)); !os.IsNotExist(err) {
+			t.Fatalf("did not expect %s in mirror target", unexpected)
+		}
+	}
+}
+
 func TestSeedPartialDestinationHardlinksFromLatest(t *testing.T) {
 	targetRoot := t.TempDir()
 	latestSource := filepath.Join(targetRoot, "latest", "app", "files")
@@ -248,6 +315,69 @@ func TestRestoreTargetServesRequestedSnapshotSubtree(t *testing.T) {
 	}
 }
 
+func TestRestoreTargetServesCurrentMirrorSubtree(t *testing.T) {
+	ca, err := tlsutil.NewRunCA("backup", "restore-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetIdentity := tlsutil.TargetIdentity("backup", "restore-1", "backup", "archive")
+	targetBundle, err := ca.Mint(targetIdentity, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writerIdentity := tlsutil.SourceIdentity("backup", "restore-1", "app", "files")
+	writerBundle, err := ca.Mint(writerIdentity, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(targetRoot, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetRoot, "nested", "data.txt"), []byte("mirror-payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	destinationRoot := t.TempDir()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ServeRestoreTarget(ctx, listener, RestoreTargetOptions{
+			TargetRoot: targetRoot,
+			TLSBundle:  targetBundle,
+			Writer: ExpectedRestoreWriter{
+				Identity: writerIdentity,
+				Snapshot: "current",
+				Source:   ".",
+			},
+		})
+	}()
+	if err := ReceiveRestore(ctx, RestoreWriterOptions{
+		Destination:    destinationRoot,
+		Snapshot:       "current",
+		Source:         ".",
+		TargetEndpoint: listener.Addr().String(),
+		TLSBundle:      writerBundle,
+		ExpectedTarget: targetIdentity,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(destinationRoot, "nested", "data.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "mirror-payload" {
+		t.Fatalf("expected transferred restore payload, got %q", string(data))
+	}
+}
+
 func TestRestoreRsyncClientArgsIncludeTypedOptions(t *testing.T) {
 	args := rsyncRestoreClientArgs(RestoreWriterOptions{
 		Destination:   "/restore",
@@ -349,6 +479,24 @@ func TestParseExpectedTransferSourcesSupportsLegacyFinalizeOnlySources(t *testin
 		t.Fatalf("unexpected receiver destination %q", receivers[0].Destination)
 	}
 	if len(finalize) != 2 || finalize[0] != "app/data" || finalize[1] != "app/files" {
+		t.Fatalf("unexpected finalize sources %#v", finalize)
+	}
+}
+
+func TestParseExpectedTransferSourcesWithMirrorRoot(t *testing.T) {
+	receivers, finalize, err := ParseExpectedTransferSourcesWithStrategy("backup", "run-1", "backup-run-1", true, []string{
+		"app/source=.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receivers) != 1 {
+		t.Fatalf("expected one receiver source, got %d", len(receivers))
+	}
+	if receivers[0].Destination != "." {
+		t.Fatalf("unexpected receiver destination %q", receivers[0].Destination)
+	}
+	if len(finalize) != 1 || finalize[0] != "" {
 		t.Fatalf("unexpected finalize sources %#v", finalize)
 	}
 }

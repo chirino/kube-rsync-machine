@@ -85,7 +85,7 @@ Generated from `config/crd/bases/*.yaml`.
 | `spec.consistency.capture` | `string` | no | "Auto" | "Direct", "VolumeSnapshot", "Auto" | Capture method for source consistency. |
 | `spec.consistency.cleanupPolicy` | `string` | no | "Delete" | "Delete", "RetainOnFailure" | Cleanup behavior for temporary snapshot resources. |
 | `spec.consistency.volumeSnapshotClassName` | `string` | no |  |  | VolumeSnapshotClass to use when snapshot capture is selected. |
-| `spec.destinationPath` | `string` | no |  |  | Relative path under the source namespace in each restore point. |
+| `spec.destinationPath` | `string` | no |  |  | Relative target path. Snapshot machines store it under the source namespace in each restore point; Mirror machines store it relative to the target PVC root. |
 | `spec.imagePullSecrets` | `[]object` | no |  |  | Image pull secrets for generated sender jobs. |
 | `spec.imagePullSecrets[].name` | `string` | yes |  |  | Name of the image pull secret. |
 | `spec.machineRef` | `object` | yes |  |  | Machine that stores backups for this source. |
@@ -225,6 +225,8 @@ Generated from `config/crd/bases/*.yaml`.
 | `spec.schedule` | `string` | no |  |  | Cron expression for scheduled backups. Omit for manual-only backups. |
 | `spec.schedulerName` | `string` | no |  |  | Scheduler name for generated target-side jobs. |
 | `spec.securityContext` | `object` | no |  |  | Pod security context for generated target-side jobs. |
+| `spec.strategy` | `object` | no |  |  | Backup storage strategy. Defaults to Snapshot. |
+| `spec.strategy.type` | `string` | no | `Snapshot`, `Mirror` |  | Snapshot keeps timestamped restore points; Mirror keeps only the current target tree. |
 | `spec.tolerations` | `[]object` | no |  |  | Tolerations for generated target-side jobs. |
 | `spec.topologySpreadConstraints` | `[]object` | no |  |  | Topology spread constraints for generated target-side jobs. |
 
@@ -248,4 +250,3 @@ Generated from `config/crd/bases/*.yaml`.
 | `status.restorePoints[].snapshot` | `string` | yes |  |  | User-facing restore point value. |
 | `status.restorePoints[].tier` | `string` | no |  |  | Restore point tier. |
 | `status.restorePointsUpdatedAt` | `string/date-time` | no |  |  | Time restore point status was last refreshed. |
-

@@ -193,12 +193,20 @@ func BuildServeTargetJobWithControl(run krmv1alpha1.BackupJob, target krmv1alpha
 		"--target-name", target.Name,
 	}
 	args = appendControlGRPCArgs(args, controlOptions)
-	if timestamp != "" {
+	if timestamp != "" && target.Spec.Strategy.TypeOrDefault() != krmv1alpha1.BackupStrategyMirror {
 		args = append(args, "--timestamp", timestamp)
 	}
-	args = appendRetentionArgs(args, runSet.Retention)
+	if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror {
+		args = append(args, "--strategy", "mirror")
+	} else {
+		args = appendRetentionArgs(args, runSet.Retention)
+	}
 	for _, source := range runSet.Sources {
-		args = append(args, "--source", fmt.Sprintf("%s/%s=%s", source.Source.Namespace, source.Source.Name, source.EffectiveDestinationPath))
+		destination := source.EffectiveDestinationPath
+		if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror && destination == "" {
+			destination = "."
+		}
+		args = append(args, "--source", fmt.Sprintf("%s/%s=%s", source.Source.Namespace, source.Source.Name, destination))
 	}
 	labels := runLabels(run, runKindBackup, RoleTargetServer)
 	targetVolumeSource := corev1.VolumeSource{
@@ -326,7 +334,7 @@ func BuildSendSourceJobWithControl(run krmv1alpha1.BackupJob, source krmv1alpha1
 	image = machineImage(target, image)
 	targetPath := opts.TargetPath
 	if targetPath == "" {
-		partialPath, err := PartialDestinationPath(RunID(run), source)
+		partialPath, err := TransferDestinationPath(target, RunID(run), source)
 		if err != nil {
 			return nil, err
 		}
@@ -424,13 +432,20 @@ func BuildRestoreTargetJob(restore krmv1alpha1.RestoreJob, source krmv1alpha1.Ba
 
 func BuildRestoreTargetJobWithControl(restore krmv1alpha1.RestoreJob, source krmv1alpha1.BackupSource, target krmv1alpha1.RsyncMachine, image string, controlOptions DataPlaneControlOptions) (*batchv1.Job, error) {
 	image = machineImage(target, image)
-	effectivePath, err := EffectiveDestinationPath(source)
+	effectivePath, err := EffectiveDestinationPathForStrategy(target, source)
 	if err != nil {
 		return nil, err
 	}
 	snapshot := restore.Status.RestoredSnapshot
 	if snapshot == "" {
 		snapshot = restore.Spec.SnapshotOrDefault()
+	}
+	if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror && snapshot == krmv1alpha1.DefaultSnapshot {
+		snapshot = krmv1alpha1.DefaultMirrorSnapshot
+	}
+	restoreSource := effectivePath
+	if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror && restoreSource == "" {
+		restoreSource = "."
 	}
 	labels := runLabelsForRef(types.NamespacedName{Namespace: restore.Namespace, Name: restore.Name}, runKindRestore, RoleTargetServer)
 	args := []string{
@@ -442,7 +457,7 @@ func BuildRestoreTargetJobWithControl(restore krmv1alpha1.RestoreJob, source krm
 		"--target-namespace", target.Namespace,
 		"--target-name", target.Name,
 		"--restore-snapshot", snapshot,
-		"--restore-source", effectivePath,
+		"--restore-source", restoreSource,
 		"--restore-writer", fmt.Sprintf("%s/%s", source.Namespace, source.Name),
 	}
 	args = appendControlGRPCArgs(args, controlOptions)
@@ -535,7 +550,7 @@ func BuildRestoreJobWithControl(restore krmv1alpha1.RestoreJob, source krmv1alph
 	if destinationPath == "" {
 		destinationPath = source.Spec.SourcePathOrDefault()
 	}
-	effectivePath, err := EffectiveDestinationPath(source)
+	effectivePath, err := EffectiveDestinationPathForStrategy(target, source)
 	if err != nil {
 		return nil, err
 	}
@@ -543,12 +558,19 @@ func BuildRestoreJobWithControl(restore krmv1alpha1.RestoreJob, source krmv1alph
 	if snapshot == "" {
 		snapshot = restore.Spec.SnapshotOrDefault()
 	}
+	if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror && snapshot == krmv1alpha1.DefaultSnapshot {
+		snapshot = krmv1alpha1.DefaultMirrorSnapshot
+	}
+	snapshotSource := effectivePath
+	if target.Spec.Strategy.TypeOrDefault() == krmv1alpha1.BackupStrategyMirror && snapshotSource == "" {
+		snapshotSource = "."
+	}
 	labels := runLabelsForRef(types.NamespacedName{Namespace: restore.Namespace, Name: restore.Name}, runKindRestore, RoleRestoreWriter)
 	labels[LabelSource] = labelValue(source.Namespace, source.Name)
 	args := []string{
 		"restore",
 		"--snapshot", snapshot,
-		"--snapshot-source", effectivePath,
+		"--snapshot-source", snapshotSource,
 		"--target-endpoint", RestoreTargetServiceEndpoint(restore, target),
 		"--destination", path.Join("/restore", strings.TrimPrefix(destinationPath, "/")),
 		"--tls-dir", TLSMountPath,

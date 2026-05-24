@@ -49,6 +49,8 @@ with disposable data before relying on it for important workloads.
   reduce target PVC usage.
 - **Retention tiers**: keep independent hourly, daily, weekly, and monthly
   restore points.
+- **Current-state mirrors**: use the `Mirror` strategy for single-shot style
+  rsync into the target PVC root without restore point directories.
 - **Target space recovery**: when a target PVC runs short on space, the target
   job can prune older eligible restore points and retry the transfer.
 - **Stable `latest` restore point**: restore the most recent successful backup

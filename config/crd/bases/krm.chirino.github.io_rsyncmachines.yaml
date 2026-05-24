@@ -53,6 +53,14 @@ spec:
                 image:
                   type: string
                   description: Data-plane image override for jobs created for this machine.
+                strategy:
+                  type: object
+                  description: Backup storage strategy. Defaults to Snapshot.
+                  properties:
+                    type:
+                      type: string
+                      description: Snapshot keeps timestamped restore points; Mirror keeps only the current target tree.
+                      enum: [Snapshot, Mirror]
                 schedule:
                   type: string
                   description: Cron expression for scheduled backups. Omit for manual-only backups.

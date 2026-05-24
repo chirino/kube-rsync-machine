@@ -177,6 +177,13 @@ func NormalizeRelativePath(value string) (string, error) {
 	return strings.Join(cleaned, "/"), nil
 }
 
+func NormalizeTargetSubpath(value string) (string, error) {
+	if value == "" || value == "." || value == "/" {
+		return "", nil
+	}
+	return NormalizeRelativePath(value)
+}
+
 func ScanRestorePoints(root string) ([]RestorePoint, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {

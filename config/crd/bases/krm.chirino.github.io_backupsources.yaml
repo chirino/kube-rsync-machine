@@ -73,7 +73,7 @@ spec:
                   description: Path inside the source PVC to back up. Defaults to /.
                 destinationPath:
                   type: string
-                  description: Relative path under the source namespace in each restore point.
+                  description: Relative target path. Snapshot machines store it under the source namespace in each restore point; Mirror machines store it relative to the target PVC root.
                 consistency:
                   type: object
                   description: Source capture behavior before rsync starts.
