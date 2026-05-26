@@ -593,6 +593,9 @@ func (r *BackupJobReconciler) createSourceJobs(ctx context.Context, run *krmv1al
 		}
 		if decision.Method == krmv1alpha1.CaptureModeVolumeSnapshot {
 			volumeSnapshot := snapshot.BuildVolumeSnapshot(*run, source.Source)
+			if err := setOwnerReferenceIfSameNamespace(r.Scheme, &source.Source, volumeSnapshot); err != nil {
+				return ctrl.Result{}, statusChanged, fmt.Errorf("set backup source owner reference on volume snapshot %s/%s: %w", volumeSnapshot.GetNamespace(), volumeSnapshot.GetName(), err)
+			}
 			if err := r.createVolumeSnapshotIfMissing(ctx, volumeSnapshot); err != nil {
 				return ctrl.Result{}, statusChanged, err
 			}
@@ -660,6 +663,9 @@ func (r *BackupJobReconciler) createSourceJobs(ctx context.Context, run *krmv1al
 				return ctrl.Result{}, statusChanged, err
 			}
 			temporaryPVC := snapshot.BuildTemporaryPVCFromSnapshot(*run, source.Source, sourcePVC, snapshot.VolumeSnapshotRestoreSize(observedSnapshot))
+			if err := setOwnerReferenceIfSameNamespace(r.Scheme, &source.Source, temporaryPVC); err != nil {
+				return ctrl.Result{}, statusChanged, fmt.Errorf("set backup source owner reference on persistent volume claim %s/%s: %w", temporaryPVC.Namespace, temporaryPVC.Name, err)
+			}
 			if err := r.createPersistentVolumeClaimIfMissing(ctx, temporaryPVC); err != nil {
 				return ctrl.Result{}, statusChanged, err
 			}
@@ -1468,6 +1474,9 @@ func createSecretIfMissing(ctx context.Context, c client.Client, secret *corev1.
 	if err := validateExistingGeneratedSecret(existing, *secret); err != nil {
 		return fmt.Errorf("existing secret %s/%s cannot be reused: %w", secret.Namespace, secret.Name, err)
 	}
+	if err := reconcileExistingOwnerReferences(ctx, c, &existing, secret); err != nil {
+		return fmt.Errorf("update secret %s/%s owner references: %w", secret.Namespace, secret.Name, err)
+	}
 	return nil
 }
 
@@ -1513,12 +1522,8 @@ func (r *BackupJobReconciler) createSourceJobIfMissing(ctx context.Context, run 
 	if err := setControllerReferenceIfSameNamespace(r.Scheme, run, job); err != nil {
 		return fmt.Errorf("set backup job owner reference on job %s/%s: %w", job.Namespace, job.Name, err)
 	}
-	if source != nil && source.Namespace == job.Namespace && r.Scheme != nil {
-		owner, err := ownerReferenceFor(r.Scheme, source)
-		if err != nil {
-			return fmt.Errorf("build backup source owner reference for job %s/%s: %w", job.Namespace, job.Name, err)
-		}
-		job.OwnerReferences = appendOwnerReference(job.OwnerReferences, owner)
+	if err := setOwnerReferenceIfSameNamespace(r.Scheme, source, job); err != nil {
+		return fmt.Errorf("set backup source owner reference on job %s/%s: %w", job.Namespace, job.Name, err)
 	}
 	return r.createJobIfMissing(ctx, job)
 }
@@ -1542,6 +1547,18 @@ func setControllerReferenceIfSameNamespace(scheme *runtime.Scheme, owner client.
 		return nil
 	}
 	return ctrl.SetControllerReference(owner, object, scheme)
+}
+
+func setOwnerReferenceIfSameNamespace(scheme *runtime.Scheme, owner client.Object, object client.Object) error {
+	if scheme == nil || owner == nil || object == nil || owner.GetNamespace() != object.GetNamespace() {
+		return nil
+	}
+	ownerRef, err := ownerReferenceFor(scheme, owner)
+	if err != nil {
+		return err
+	}
+	object.SetOwnerReferences(appendOwnerReference(object.GetOwnerReferences(), ownerRef))
+	return nil
 }
 
 func ownerReferenceFor(scheme *runtime.Scheme, owner client.Object) (metav1.OwnerReference, error) {
@@ -1579,6 +1596,10 @@ func createJobIfMissing(ctx context.Context, c client.Client, job *batchv1.Job) 
 		if err := c.Create(ctx, job); err != nil {
 			return fmt.Errorf("create job %s/%s: %w", job.Namespace, job.Name, err)
 		}
+		return nil
+	}
+	if err := reconcileExistingOwnerReferences(ctx, c, &existing, job); err != nil {
+		return fmt.Errorf("update job %s/%s owner references: %w", job.Namespace, job.Name, err)
 	}
 	return nil
 }
@@ -1596,6 +1617,9 @@ func createServiceIfMissing(ctx context.Context, c client.Client, service *corev
 	if err != nil {
 		return err
 	}
+	if err := reconcileExistingOwnerReferences(ctx, c, &existing, service); err != nil {
+		return fmt.Errorf("update service %s/%s owner references: %w", service.Namespace, service.Name, err)
+	}
 	return nil
 }
 
@@ -1607,6 +1631,9 @@ func (r *BackupJobReconciler) createPersistentVolumeClaimIfMissing(ctx context.C
 	}
 	if err != nil {
 		return err
+	}
+	if err := reconcileExistingOwnerReferences(ctx, r.Client, &existing, pvc); err != nil {
+		return fmt.Errorf("update persistent volume claim %s/%s owner references: %w", pvc.Namespace, pvc.Name, err)
 	}
 	return nil
 }
@@ -1622,7 +1649,37 @@ func (r *BackupJobReconciler) createVolumeSnapshotIfMissing(ctx context.Context,
 	if err != nil {
 		return err
 	}
+	if err := reconcileExistingOwnerReferences(ctx, r.Client, &existing, volumeSnapshot); err != nil {
+		return fmt.Errorf("update volume snapshot %s/%s owner references: %w", volumeSnapshot.GetNamespace(), volumeSnapshot.GetName(), err)
+	}
 	return nil
+}
+
+func reconcileExistingOwnerReferences(ctx context.Context, c client.Client, existing client.Object, desired client.Object) error {
+	if len(desired.GetOwnerReferences()) == 0 {
+		return nil
+	}
+	owners := existing.GetOwnerReferences()
+	changed := false
+	for _, owner := range desired.GetOwnerReferences() {
+		next := appendOwnerReference(owners, owner)
+		if len(next) != len(owners) {
+			changed = true
+		} else {
+			for i := range owners {
+				if owners[i] != next[i] {
+					changed = true
+					break
+				}
+			}
+		}
+		owners = next
+	}
+	if !changed {
+		return nil
+	}
+	existing.SetOwnerReferences(owners)
+	return c.Update(ctx, existing)
 }
 
 func (r *BackupJobReconciler) getVolumeSnapshot(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
