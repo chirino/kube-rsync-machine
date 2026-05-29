@@ -122,6 +122,9 @@ func (r *BackupJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := cleanupBackupJobSnapshotResources(ctx, r.Client, &run, snapshotAvailable); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := cleanupBackupJobTargetServices(ctx, r.Client, &run); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, r.pruneBackupJobHistory(ctx, run)
 	}
 	if !isTerminalPhase(run.Status.Phase) && !controllerutil.ContainsFinalizer(&run, BackupJobFinalizer) {
@@ -784,6 +787,9 @@ func (r *BackupJobReconciler) reconcileBackupJobJobStatus(ctx context.Context, r
 		if err := cleanupBackupJobSnapshotResources(ctx, r.Client, run, snapshotAvailable); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := cleanupBackupJobTargetServices(ctx, r.Client, run); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, cleanupRunCredentialSecrets(ctx, r.Client, run, runKindBackup)
 	}
 	var jobs batchv1.JobList
@@ -985,6 +991,9 @@ func (r *BackupJobReconciler) reconcileBackupJobJobStatus(ctx context.Context, r
 			return ctrl.Result{}, err
 		}
 		if err := cleanupRunCredentialSecrets(ctx, r.Client, run, runKindBackup); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := cleanupBackupJobTargetServices(ctx, r.Client, run); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, r.pruneBackupJobHistory(ctx, *run)
@@ -2369,6 +2378,18 @@ func cleanupBackupJobSnapshotResources(ctx context.Context, c client.Client, run
 		if err := deleteLabeledRunVolumeSnapshots(ctx, c, labels); err != nil {
 			return fmt.Errorf("cleanup backup job volume snapshots: %w", err)
 		}
+	}
+	return nil
+}
+
+func cleanupBackupJobTargetServices(ctx context.Context, c client.Client, run client.Object) error {
+	if err := deleteLabeledRunServices(ctx, c, client.MatchingLabels{
+		LabelRunNamespace: run.GetNamespace(),
+		LabelRunKind:      runKindBackup,
+		LabelRun:          run.GetName(),
+		LabelRole:         RoleTargetServer,
+	}); err != nil {
+		return fmt.Errorf("cleanup backup job target services: %w", err)
 	}
 	return nil
 }

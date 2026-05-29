@@ -1916,10 +1916,11 @@ func TestBackupJobReconcilerMarksSucceededWhenJobsComplete(t *testing.T) {
 	run.Status.Phase = krmv1alpha1.RunPhaseRunning
 	targetJob := completedJob("backup", "target", runLabels(run, runKindBackup, RoleTargetServer))
 	sourceJob := completedJob("app-prod", "source", runLabels(run, runKindBackup, RoleSourceSender))
+	targetService := runService("backup", "target", runLabels(run, runKindBackup, RoleTargetServer))
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&krmv1alpha1.BackupJob{}).
-		WithObjects(&run, targetJob, sourceJob).
+		WithObjects(&run, targetJob, sourceJob, targetService).
 		Build()
 	reconciler := BackupJobReconciler{Client: client, Scheme: scheme}
 
@@ -1934,6 +1935,7 @@ func TestBackupJobReconcilerMarksSucceededWhenJobsComplete(t *testing.T) {
 	if updated.Status.Phase != krmv1alpha1.RunPhaseSucceeded || updated.Status.CompletedAt == nil {
 		t.Fatalf("unexpected status: %#v", updated.Status)
 	}
+	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: "target"}, &corev1.Service{})
 }
 
 func TestRestoreJobReconcilerMarksFailedWhenJobFails(t *testing.T) {
@@ -2012,10 +2014,11 @@ func TestBackupJobReconcilerReleasesTargetGuardForTerminalRun(t *testing.T) {
 	controllerutil.AddFinalizer(&run, BackupJobFinalizer)
 	run.Status.Phase = krmv1alpha1.RunPhaseSucceeded
 	lease := targetGuardLease(run, types.NamespacedName{Namespace: "backup", Name: "archive"})
+	targetService := runService("backup", "target", runLabels(run, runKindBackup, RoleTargetServer))
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&krmv1alpha1.BackupJob{}).
-		WithObjects(&run, lease).
+		WithObjects(&run, lease, targetService).
 		Build()
 	reconciler := BackupJobReconciler{Client: client, Scheme: scheme}
 
@@ -2025,6 +2028,7 @@ func TestBackupJobReconcilerReleasesTargetGuardForTerminalRun(t *testing.T) {
 	}
 
 	assertNotFound(t, client, TargetGuardLeaseRef(types.NamespacedName{Namespace: "backup", Name: "archive"}), &coordinationv1.Lease{})
+	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: "target"}, &corev1.Service{})
 	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "demo-run"}, &krmv1alpha1.BackupJob{})
 }
 
