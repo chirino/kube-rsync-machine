@@ -2,6 +2,7 @@ package controller
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,78 @@ func TestGeneratedScheduledBackupJobNameKeepsTimestamp(t *testing.T) {
 	}
 	if want := "20260522-1200"; name[len(name)-len(want):] != want {
 		t.Fatalf("expected generated name %q to keep timestamp suffix %q", name, want)
+	}
+}
+
+func TestGeneratedControllerNamesAvoidTruncationCollisions(t *testing.T) {
+	runA := "krm-guidedbydestiny-idlewild-20260614-1200"
+	runB := "krm-guidedbydestiny-idlewild-20260614-1300"
+	namespace := "www-guidedbydestiny-com"
+
+	cases := []struct {
+		name string
+		a    string
+		b    string
+	}{
+		{
+			name: "source job",
+			a:    GeneratedJobName("source-"+namespace, runA),
+			b:    GeneratedJobName("source-"+namespace, runB),
+		},
+		{
+			name: "target service",
+			a:    GeneratedServiceName("target", strings.Repeat("shared-run-prefix-", 5)+"a"),
+			b:    GeneratedServiceName("target", strings.Repeat("shared-run-prefix-", 5)+"b"),
+		},
+		{
+			name: "tls secret",
+			a:    GeneratedTLSSecretName(namespace+"-"+runA, RoleSourceSender, namespace, namespace),
+			b:    GeneratedTLSSecretName(namespace+"-"+runB, RoleSourceSender, namespace, namespace),
+		},
+		{
+			name: "cron job",
+			a:    GeneratedCronJobName(strings.Repeat("long-machine-prefix-", 4) + "a"),
+			b:    GeneratedCronJobName(strings.Repeat("long-machine-prefix-", 4) + "b"),
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if len(test.a) > 63 || len(test.b) > 63 {
+				t.Fatalf("generated names exceed DNS label length: %q %q", test.a, test.b)
+			}
+			if test.a == test.b {
+				t.Fatalf("expected distinct generated names, got %q", test.a)
+			}
+		})
+	}
+}
+
+func TestGeneratedScheduledBackupJobNamesAvoidTruncationCollisions(t *testing.T) {
+	scheduledAt := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+	nameA := GeneratedScheduledBackupJobName(strings.Repeat("long-machine-prefix-", 4)+"a", scheduledAt)
+	nameB := GeneratedScheduledBackupJobName(strings.Repeat("long-machine-prefix-", 4)+"b", scheduledAt)
+	if len(nameA) > 63 || len(nameB) > 63 {
+		t.Fatalf("generated names exceed DNS label length: %q %q", nameA, nameB)
+	}
+	if nameA == nameB {
+		t.Fatalf("expected distinct scheduled backup job names, got %q", nameA)
+	}
+	if want := "20260522-1200"; !strings.HasSuffix(nameA, want) || !strings.HasSuffix(nameB, want) {
+		t.Fatalf("expected scheduled backup job names to keep timestamp suffix: %q %q", nameA, nameB)
+	}
+}
+
+func TestGeneratedCommandIDsAvoidTruncationCollisions(t *testing.T) {
+	finalizeA := "finalize-" + dnsLabel(strings.Repeat("long-run-prefix-", 5)+"a")
+	finalizeB := "finalize-" + dnsLabel(strings.Repeat("long-run-prefix-", 5)+"b")
+	if finalizeA == finalizeB {
+		t.Fatalf("expected distinct finalize command IDs, got %q", finalizeA)
+	}
+
+	recoverA := "recover-space-" + dnsLabel(strings.Repeat("long-source-prefix-", 5)+"a")
+	recoverB := "recover-space-" + dnsLabel(strings.Repeat("long-source-prefix-", 5)+"b")
+	if recoverA == recoverB {
+		t.Fatalf("expected distinct recover command IDs, got %q", recoverA)
 	}
 }
 

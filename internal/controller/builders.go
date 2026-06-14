@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path"
 	"strconv"
@@ -650,14 +652,7 @@ func GeneratedCronJobName(planName string) string {
 
 func GeneratedScheduledBackupJobName(machineName string, scheduledAt time.Time) string {
 	timestamp := scheduledAt.UTC().Format("20060102-1504")
-	prefix := dnsLabel(machineName)
-	maxPrefix := 63 - len("krm--") - len(timestamp)
-	if len(prefix) > maxPrefix {
-		prefix = strings.TrimRight(prefix[:maxPrefix], "-")
-	}
-	if prefix == "" {
-		prefix = "machine"
-	}
+	prefix := dnsLabelMax(machineName, 63-len("krm--")-len(timestamp))
 	return "krm-" + prefix + "-" + timestamp
 }
 
@@ -745,6 +740,10 @@ func labelValue(parts ...string) string {
 }
 
 func dnsLabel(value string) string {
+	return dnsLabelMax(value, 63)
+}
+
+func dnsLabelMax(value string, maxLength int) string {
 	value = strings.ToLower(value)
 	var b strings.Builder
 	lastDash := false
@@ -764,8 +763,18 @@ func dnsLabel(value string) string {
 	if out == "" {
 		out = "krm"
 	}
-	if len(out) > 63 {
-		out = strings.TrimRight(out[:63], "-")
+	if len(out) <= maxLength {
+		return out
 	}
-	return out
+
+	sum := sha256.Sum256([]byte(out))
+	suffix := hex.EncodeToString(sum[:])[:10]
+	if maxLength <= len(suffix) {
+		return suffix[:maxLength]
+	}
+	prefix := strings.TrimRight(out[:maxLength-len(suffix)-1], "-")
+	if prefix == "" {
+		return suffix
+	}
+	return prefix + "-" + suffix
 }
