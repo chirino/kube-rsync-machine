@@ -221,6 +221,7 @@ Generated from `config/crd/bases/*.yaml`.
 | `spec.retention.monthly` | `integer/int32` | no |  |  | Number of monthly restore points to keep. |
 | `spec.retention.weekly` | `integer/int32` | no |  |  | Number of weekly restore points to keep. |
 | `spec.runHistory` | `object` | no |  |  | Completed BackupJob history retention. |
+| `spec.runHistory.count` | `integer/int32` | no |  |  | Total completed BackupJob records to keep across all terminal phases. With count set the successful and failed limits only apply when explicitly configured. |
 | `spec.runHistory.failed` | `integer/int32` | no |  |  | Failed BackupJob records to keep. |
 | `spec.runHistory.successful` | `integer/int32` | no |  |  | Successful BackupJob records to keep. |
 | `spec.runtimeClassName` | `string` | no |  |  | RuntimeClass for generated target-side jobs. |

@@ -1259,7 +1259,7 @@ func (r *BackupJobReconciler) pruneBackupJobHistory(ctx context.Context, run krm
 		return fmt.Errorf("list backup jobs for history pruning: %w", err)
 	}
 
-	var successful, failed []krmv1alpha1.BackupJob
+	var completed, successful, failed []krmv1alpha1.BackupJob
 	for _, candidate := range runs.Items {
 		if candidate.Spec.TriggerOrDefault() != krmv1alpha1.BackupJobTriggerScheduled {
 			continue
@@ -1271,6 +1271,7 @@ func (r *BackupJobReconciler) pruneBackupJobHistory(ctx context.Context, run krm
 		if err != nil || candidateMachineRef != machineRef {
 			continue
 		}
+		completed = append(completed, candidate)
 		switch candidate.Status.Phase {
 		case krmv1alpha1.RunPhaseSucceeded:
 			successful = append(successful, candidate)
@@ -1278,7 +1279,24 @@ func (r *BackupJobReconciler) pruneBackupJobHistory(ctx context.Context, run krm
 			failed = append(failed, candidate)
 		}
 	}
-	pruneCandidates := append(pruneBackupJobHistoryCandidates(successful, machine.Spec.RunHistory.SuccessfulOrDefault()), pruneBackupJobHistoryCandidates(failed, machine.Spec.RunHistory.FailedOrDefault())...)
+	pruneCandidatesByKey := map[string]krmv1alpha1.BackupJob{}
+	runHistory := machine.Spec.RunHistory
+	if runHistory.HasCountLimit() {
+		addBackupJobHistoryPruneCandidates(pruneCandidatesByKey, pruneBackupJobHistoryCandidates(completed, runHistory.Count))
+		if runHistory.Successful > 0 {
+			addBackupJobHistoryPruneCandidates(pruneCandidatesByKey, pruneBackupJobHistoryCandidates(successful, runHistory.Successful))
+		}
+		if runHistory.Failed > 0 {
+			addBackupJobHistoryPruneCandidates(pruneCandidatesByKey, pruneBackupJobHistoryCandidates(failed, runHistory.Failed))
+		}
+	} else {
+		addBackupJobHistoryPruneCandidates(pruneCandidatesByKey, pruneBackupJobHistoryCandidates(successful, runHistory.SuccessfulOrDefault()))
+		addBackupJobHistoryPruneCandidates(pruneCandidatesByKey, pruneBackupJobHistoryCandidates(failed, runHistory.FailedOrDefault()))
+	}
+	pruneCandidates := make([]krmv1alpha1.BackupJob, 0, len(pruneCandidatesByKey))
+	for _, candidate := range pruneCandidatesByKey {
+		pruneCandidates = append(pruneCandidates, candidate)
+	}
 	snapshotAvailable := false
 	if r.SnapshotCapabilities != nil {
 		snapshotAvailable = r.SnapshotCapabilities.VolumeSnapshotAvailable(ctx)
@@ -1293,6 +1311,13 @@ func (r *BackupJobReconciler) pruneBackupJobHistory(ctx context.Context, run krm
 		}
 	}
 	return nil
+}
+
+func addBackupJobHistoryPruneCandidates(candidates map[string]krmv1alpha1.BackupJob, runs []krmv1alpha1.BackupJob) {
+	for i := range runs {
+		candidate := runs[i]
+		candidates[namespacedKey(candidate.Namespace, candidate.Name)] = candidate
+	}
 }
 
 func pruneBackupJobHistoryCandidates(runs []krmv1alpha1.BackupJob, keep int) []krmv1alpha1.BackupJob {

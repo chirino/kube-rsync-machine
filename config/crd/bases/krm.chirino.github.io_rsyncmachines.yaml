@@ -140,6 +140,7 @@ spec:
                   type: object
                   description: Completed BackupJob history retention.
                   properties:
+                    count: {type: integer, format: int32, minimum: 0, description: Total completed BackupJob records to keep across all terminal phases. With count set the successful and failed limits only apply when explicitly configured.}
                     successful: {type: integer, format: int32, minimum: 0, description: Successful BackupJob records to keep.}
                     failed: {type: integer, format: int32, minimum: 0, description: Failed BackupJob records to keep.}
             status:

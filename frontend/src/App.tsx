@@ -132,6 +132,7 @@ type RetentionPolicy = {
 };
 
 type RunHistory = {
+  count?: number;
   successful?: number;
   failed?: number;
 };
@@ -759,7 +760,7 @@ function buildMockData(): ResourceState {
           schedule: "*/30 * * * *",
           concurrencyPolicy: "Replace",
           retention: { hourly: 12, daily: 5, weekly: 2 },
-          runHistory: { successful: 5, failed: 10 },
+          runHistory: { count: 12, failed: 10 },
         },
         status: {
           restorePointCount: 12,
@@ -1209,6 +1210,7 @@ function MachineCard({ group, progress }: { group: MachineGroup; progress: Progr
 function ScheduleDetails({ machine }: { machine: KubeObject<MachineSpec, MachineStatus> }) {
   const spec = machine.spec;
   const concurrency = spec?.concurrencyPolicy || "Forbid";
+  const totalRuns = spec?.runHistory?.count;
   const successfulRuns = spec?.runHistory?.successful ?? 5;
   const failedRuns = spec?.runHistory?.failed ?? 5;
   return (
@@ -1231,9 +1233,29 @@ function ScheduleDetails({ machine }: { machine: KubeObject<MachineSpec, Machine
       </div>
       <div>
         <span className="text-xs text-stone2-400">Runs</span>{" "}
-        <Tip label={`Retain ${successfulRuns} successful runs`} className="ml-1 text-sage-700">{successfulRuns}</Tip>
-        <span className="px-1 text-stone2-300">/</span>
-        <Tip label={`Retain ${failedRuns} failed runs`} className="text-red-400">{failedRuns}</Tip>
+        {totalRuns ? (
+          <>
+            <Tip label={`Retain ${formatRunHistory(spec?.runHistory)}`} className="ml-1 text-stone2-700">{totalRuns}</Tip>
+            {spec?.runHistory?.successful ? (
+              <>
+                <span className="px-1 text-stone2-300">/</span>
+                <Tip label={`Retain at most ${spec.runHistory.successful} successful runs`} className="text-sage-700">{spec.runHistory.successful}</Tip>
+              </>
+            ) : null}
+            {spec?.runHistory?.failed ? (
+              <>
+                <span className="px-1 text-stone2-300">/</span>
+                <Tip label={`Retain at most ${spec.runHistory.failed} failed runs`} className="text-red-400">{spec.runHistory.failed}</Tip>
+              </>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <Tip label={`Retain ${successfulRuns} successful runs`} className="ml-1 text-sage-700">{successfulRuns}</Tip>
+            <span className="px-1 text-stone2-300">/</span>
+            <Tip label={`Retain ${failedRuns} failed runs`} className="text-red-400">{failedRuns}</Tip>
+          </>
+        )}
       </div>
       {spec?.schedulerName ? (
         <div><span className="text-xs text-stone2-400">Scheduler</span> <span className="ml-1 text-stone2-700">{spec.schedulerName}</span></div>
@@ -2113,6 +2135,12 @@ function padCronTime(value: string) {
 }
 
 function formatRunHistory(runHistory?: RunHistory) {
+  if (runHistory?.count) {
+    const limits = [`${runHistory.count} total`];
+    if (runHistory.successful) limits.push(`${runHistory.successful} successful`);
+    if (runHistory.failed) limits.push(`${runHistory.failed} failed`);
+    return limits.join(", ");
+  }
   const successful = runHistory?.successful ?? 5;
   const failed = runHistory?.failed ?? 5;
   return `${successful} successful, ${failed} failed`;

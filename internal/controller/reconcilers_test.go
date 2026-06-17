@@ -563,6 +563,84 @@ func TestBackupJobReconcilerPrunesCompletedRunHistory(t *testing.T) {
 	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "archive-pvc"}, &corev1.PersistentVolumeClaim{})
 }
 
+func TestBackupJobReconcilerPrunesCompletedRunHistoryByCount(t *testing.T) {
+	scheme := testControllerScheme(t)
+	ctx := context.Background()
+	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	target.Spec.RunHistory = krmv1alpha1.RunHistory{Count: 6}
+	targetPVC := &corev1.PersistentVolumeClaim{ObjectMeta: objectMeta("backup", "archive-pvc")}
+	source := backupSource("app-prod", "files", "data-pvc", "sites/demo/files")
+	plan := rsyncMachine("backup", "demo", ref("backup", "archive"), []krmv1alpha1.ObjectReference{ref("app-prod", "files")}, krmv1alpha1.RetentionPolicy{})
+	successOld := completedBackupJob("backup", "success-old", ref("backup", "demo"), krmv1alpha1.RunPhaseSucceeded, time.Date(2026, 5, 20, 9, 0, 0, 0, time.UTC))
+	success1 := completedBackupJob("backup", "success-1", ref("backup", "demo"), krmv1alpha1.RunPhaseSucceeded, time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC))
+	success2 := completedBackupJob("backup", "success-2", ref("backup", "demo"), krmv1alpha1.RunPhaseSucceeded, time.Date(2026, 5, 20, 11, 0, 0, 0, time.UTC))
+	success3 := completedBackupJob("backup", "success-3", ref("backup", "demo"), krmv1alpha1.RunPhaseSucceeded, time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC))
+	success4 := completedBackupJob("backup", "success-4", ref("backup", "demo"), krmv1alpha1.RunPhaseSucceeded, time.Date(2026, 5, 20, 13, 0, 0, 0, time.UTC))
+	success5 := completedBackupJob("backup", "success-5", ref("backup", "demo"), krmv1alpha1.RunPhaseSucceeded, time.Date(2026, 5, 20, 14, 0, 0, 0, time.UTC))
+	failedNew := completedBackupJob("backup", "failed-new", ref("backup", "demo"), krmv1alpha1.RunPhaseFailed, time.Date(2026, 5, 20, 15, 0, 0, 0, time.UTC))
+	for _, run := range []*krmv1alpha1.BackupJob{&successOld, &success1, &success2, &success3, &success4, &success5, &failedNew} {
+		run.Spec.Trigger = krmv1alpha1.BackupJobTriggerScheduled
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&krmv1alpha1.BackupJob{}).
+		WithObjects(&target, targetPVC, &source, &plan, &successOld, &success1, &success2, &success3, &success4, &success5, &failedNew).
+		Build()
+	reconciler := BackupJobReconciler{Client: client, Scheme: scheme}
+
+	for i := 0; i < 2; i++ {
+		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "backup", Name: "failed-new"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: "success-old"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "success-1"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "success-2"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "success-3"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "success-4"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "success-5"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "failed-new"}, &krmv1alpha1.BackupJob{})
+}
+
+func TestBackupJobReconcilerPrunesCompletedRunHistoryWithAllCaps(t *testing.T) {
+	scheme := testControllerScheme(t)
+	ctx := context.Background()
+	target := backupTarget("backup", "archive", "archive-pvc", krmv1alpha1.RetentionPolicy{})
+	target.Spec.RunHistory = krmv1alpha1.RunHistory{Count: 4, Successful: 1, Failed: 3}
+	targetPVC := &corev1.PersistentVolumeClaim{ObjectMeta: objectMeta("backup", "archive-pvc")}
+	source := backupSource("app-prod", "files", "data-pvc", "sites/demo/files")
+	plan := rsyncMachine("backup", "demo", ref("backup", "archive"), []krmv1alpha1.ObjectReference{ref("app-prod", "files")}, krmv1alpha1.RetentionPolicy{})
+	failedOld := completedBackupJob("backup", "failed-old", ref("backup", "demo"), krmv1alpha1.RunPhaseFailed, time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC))
+	successOld := completedBackupJob("backup", "success-old", ref("backup", "demo"), krmv1alpha1.RunPhaseSucceeded, time.Date(2026, 5, 20, 11, 0, 0, 0, time.UTC))
+	failedMid := completedBackupJob("backup", "failed-mid", ref("backup", "demo"), krmv1alpha1.RunPhaseCanceled, time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC))
+	successNew := completedBackupJob("backup", "success-new", ref("backup", "demo"), krmv1alpha1.RunPhaseSucceeded, time.Date(2026, 5, 20, 13, 0, 0, 0, time.UTC))
+	failedNew := completedBackupJob("backup", "failed-new", ref("backup", "demo"), krmv1alpha1.RunPhaseFailed, time.Date(2026, 5, 20, 14, 0, 0, 0, time.UTC))
+	for _, run := range []*krmv1alpha1.BackupJob{&failedOld, &successOld, &failedMid, &successNew, &failedNew} {
+		run.Spec.Trigger = krmv1alpha1.BackupJobTriggerScheduled
+	}
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&krmv1alpha1.BackupJob{}).
+		WithObjects(&target, targetPVC, &source, &plan, &failedOld, &successOld, &failedMid, &successNew, &failedNew).
+		Build()
+	reconciler := BackupJobReconciler{Client: client, Scheme: scheme}
+
+	for i := 0; i < 2; i++ {
+		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "backup", Name: "failed-new"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: "failed-old"}, &krmv1alpha1.BackupJob{})
+	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: "success-old"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "failed-mid"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "success-new"}, &krmv1alpha1.BackupJob{})
+	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "failed-new"}, &krmv1alpha1.BackupJob{})
+}
+
 func TestBackupJobReconcilerDoesNotPruneManualRunHistory(t *testing.T) {
 	scheme := testControllerScheme(t)
 	ctx := context.Background()

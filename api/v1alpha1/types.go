@@ -258,8 +258,13 @@ func (o ConsistencyOptions) CleanupPolicyOrDefault() CleanupPolicy {
 }
 
 type RunHistory struct {
+	Count      int `json:"count,omitempty"`
 	Successful int `json:"successful,omitempty"`
 	Failed     int `json:"failed,omitempty"`
+}
+
+func (h RunHistory) HasCountLimit() bool {
+	return h.Count > 0
 }
 
 func (h RunHistory) SuccessfulOrDefault() int {
