@@ -1,0 +1,32 @@
+{
+  "pins": [
+    {
+      "ecosystem": "npm",
+      "name": "nanoid",
+      "pinnedVersion": "3.3.12",
+      "location": "frontend/pnpm-workspace.yaml overrides",
+      "class": "temporary cooldown",
+      "reason": "nanoid 3.3.15 was selected transitively by the frontend resolver but is inside the 14-day cooldown window.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-06-28",
+      "blockedVersion": "3.3.15",
+      "blockedPublishedAt": "2026-06-21T21:23:58.804Z",
+      "reviewAfter": "next dependency update",
+      "verification": "cd frontend && pnpm install --frozen-lockfile --ignore-scripts && pnpm build"
+    },
+    {
+      "ecosystem": "npm",
+      "name": "rollup",
+      "pinnedVersion": "4.60.4",
+      "location": "frontend/pnpm-workspace.yaml overrides",
+      "class": "temporary cooldown",
+      "reason": "rollup 4.62.2 and matching platform packages were selected transitively by the frontend resolver but are inside the 14-day cooldown window.",
+      "introducedBy": "dependency-update",
+      "introducedAt": "2026-06-28",
+      "blockedVersion": "4.62.2",
+      "blockedPublishedAt": "2026-06-19T14:57:23.529Z",
+      "reviewAfter": "next dependency update",
+      "verification": "cd frontend && pnpm install --frozen-lockfile --ignore-scripts && pnpm build"
+    }
+  ]
+}
