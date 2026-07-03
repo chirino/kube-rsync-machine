@@ -3,7 +3,7 @@
 FROM --platform=$BUILDPLATFORM node:25-alpine AS frontend-builder
 
 WORKDIR /workspace/frontend
-RUN npm install -g pnpm@10.10.0
+RUN npm install -g pnpm@10.34.4
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
@@ -11,7 +11,7 @@ RUN pnpm build
 
 # Run the Go toolchain on the native builder platform and cross-compile for the
 # target image architecture. This avoids slow QEMU-emulated Go builds.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH

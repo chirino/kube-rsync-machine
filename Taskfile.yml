@@ -10,6 +10,14 @@ tasks:
     cmds:
       - "{{.GO}} test ./..."
 
+  govulncheck:
+    desc: "run govulncheck against the Go codebase"
+    vars:
+      GO: '{{.GO | default (env "GO") | default "go"}}'
+      GOVULNCHECK_VERSION: '{{.GOVULNCHECK_VERSION | default (env "GOVULNCHECK_VERSION") | default "v1.5.0"}}'
+    cmds:
+      - "{{.GO}} run golang.org/x/vuln/cmd/govulncheck@{{.GOVULNCHECK_VERSION}} ./..."
+
   docs-crd-reference:
     desc: "generate the CRD reference documentation"
     vars:
