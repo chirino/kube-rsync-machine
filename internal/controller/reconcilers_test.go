@@ -22,6 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -711,9 +712,23 @@ func TestRsyncMachineReconcilerDeletesScheduledBackupJobsOnDelete(t *testing.T) 
 	scheduled := backupRun("backup", "scheduled-run", ref("backup", "archive"))
 	scheduled.Spec.Trigger = krmv1alpha1.BackupJobTriggerScheduled
 	cronJob := batchv1.CronJob{ObjectMeta: objectMeta("backup", GeneratedCronJobName(target.Name))}
+	deletedCronJobWithBackgroundPropagation := false
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(&target, &manual, &scheduled, &cronJob).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if cronJob, ok := obj.(*batchv1.CronJob); ok && cronJob.Namespace == "backup" && cronJob.Name == GeneratedCronJobName(target.Name) {
+					deleteOptions := client.DeleteOptions{}
+					deleteOptions.ApplyOptions(opts)
+					if deleteOptions.PropagationPolicy == nil || *deleteOptions.PropagationPolicy != metav1.DeletePropagationBackground {
+						t.Fatalf("expected generated cronjob delete to use background propagation, got %#v", deleteOptions.PropagationPolicy)
+					}
+					deletedCronJobWithBackgroundPropagation = true
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
 		Build()
 	reconciler := RsyncMachineReconciler{Client: client, Scheme: scheme}
 	if err := client.Delete(ctx, &target); err != nil {
@@ -727,6 +742,9 @@ func TestRsyncMachineReconcilerDeletesScheduledBackupJobsOnDelete(t *testing.T) 
 
 	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: "scheduled-run"}, &krmv1alpha1.BackupJob{})
 	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: cronJob.Name}, &batchv1.CronJob{})
+	if !deletedCronJobWithBackgroundPropagation {
+		t.Fatal("expected generated cronjob to be deleted with background propagation")
+	}
 	assertExists(t, client, types.NamespacedName{Namespace: "backup", Name: "manual-run"}, &krmv1alpha1.BackupJob{})
 	assertNotFound(t, client, types.NamespacedName{Namespace: "backup", Name: "archive"}, &krmv1alpha1.RsyncMachine{})
 }
@@ -1512,10 +1530,24 @@ func TestBackupJobReconcilerRetriesSourceAfterRecoveryAck(t *testing.T) {
 		Message:  "rsync: write failed: No space left on device",
 	}}
 	sourceJob := failedJob("app-prod", "krm-source-files-demo-run", runLabels(run, runKindBackup, RoleSourceSender))
+	deletedSourceJobWithBackgroundPropagation := false
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&krmv1alpha1.BackupJob{}).
 		WithObjects(&target, &source, &plan, &run, sourceJob).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if job, ok := obj.(*batchv1.Job); ok && job.Namespace == "app-prod" && job.Name == "krm-source-files-demo-run" {
+					deleteOptions := client.DeleteOptions{}
+					deleteOptions.ApplyOptions(opts)
+					if deleteOptions.PropagationPolicy == nil || *deleteOptions.PropagationPolicy != metav1.DeletePropagationBackground {
+						t.Fatalf("expected failed source job delete to use background propagation, got %#v", deleteOptions.PropagationPolicy)
+					}
+					deletedSourceJobWithBackgroundPropagation = true
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
 		Build()
 	reconciler := BackupJobReconciler{Client: client, Scheme: scheme, Image: "krm:test", Control: control.NewService(control.NewEventHub(4))}
 
@@ -1525,6 +1557,9 @@ func TestBackupJobReconcilerRetriesSourceAfterRecoveryAck(t *testing.T) {
 	}
 	if result.RequeueAfter == 0 {
 		t.Fatal("expected retry requeue")
+	}
+	if !deletedSourceJobWithBackgroundPropagation {
+		t.Fatal("expected failed source job to be deleted with background propagation")
 	}
 	assertNotFound(t, client, types.NamespacedName{Namespace: "app-prod", Name: "krm-source-files-demo-run"}, &batchv1.Job{})
 	var updated krmv1alpha1.BackupJob

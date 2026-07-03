@@ -1088,7 +1088,7 @@ func (r *BackupJobReconciler) reconcileRecoverableSourceJobFailure(ctx context.C
 		if job.CreationTimestamp.After(run.Status.LastCommand.AcknowledgedAt.Time) {
 			return ctrl.Result{}, false, nil
 		}
-		if err := r.Delete(ctx, &job); err != nil && !apierrors.IsNotFound(err) {
+		if err := deleteJobWithBackgroundPropagation(ctx, r.Client, &job); err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, true, fmt.Errorf("delete failed source job after target recovery: %w", err)
 		}
 		run.Status.Phase = krmv1alpha1.RunPhaseRunning
@@ -2432,13 +2432,21 @@ func deleteLabeledRunJobs(ctx context.Context, c client.Client, labels client.Ma
 	if err := c.List(ctx, &jobs, labels); err != nil {
 		return err
 	}
-	propagation := metav1.DeletePropagationBackground
 	for i := range jobs.Items {
-		if err := c.Delete(ctx, &jobs.Items[i], &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+		if err := deleteJobWithBackgroundPropagation(ctx, c, &jobs.Items[i]); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}
 	return nil
+}
+
+func deleteJobWithBackgroundPropagation(ctx context.Context, c client.Client, job *batchv1.Job) error {
+	return deleteWithBackgroundPropagation(ctx, c, job)
+}
+
+func deleteWithBackgroundPropagation(ctx context.Context, c client.Client, object client.Object) error {
+	propagation := metav1.DeletePropagationBackground
+	return c.Delete(ctx, object, &client.DeleteOptions{PropagationPolicy: &propagation})
 }
 
 func deleteLabeledRunPersistentVolumeClaims(ctx context.Context, c client.Client, labels client.MatchingLabels) error {
@@ -2694,7 +2702,7 @@ func (r *RsyncMachineReconciler) deleteGeneratedCronJob(ctx context.Context, tar
 	if err := r.Get(ctx, cronJobName, &cronJob); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	return client.IgnoreNotFound(r.Delete(ctx, &cronJob))
+	return client.IgnoreNotFound(deleteWithBackgroundPropagation(ctx, r.Client, &cronJob))
 }
 
 func (r *RsyncMachineReconciler) deleteScheduledBackupJobsForMachine(ctx context.Context, target krmv1alpha1.RsyncMachine) error {
